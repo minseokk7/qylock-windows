@@ -1,0 +1,21 @@
+{
+  "$schema": "../gen/schemas/permission-schema.json",
+  "permission": [
+    {
+      "identifier": "main-commands",
+      "description": "Allow main window commands",
+      "commands": {
+        "allow": [
+          "verify_hello",
+          "lock_screen",
+          "emergency_unlock",
+          "close_app",
+          "get_lock_state",
+          "hide_settings_window",
+          "get_settings",
+          "save_settings"
+        ]
+      }
+    }
+  ]
+}
