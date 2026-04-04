@@ -5,7 +5,7 @@ use std::{
     io::ErrorKind,
     mem::size_of,
     path::PathBuf,
-    sync::{LazyLock, Mutex, OnceLock},
+    sync::{Condvar, LazyLock, Mutex, OnceLock},
     thread,
     time::Duration,
 };
@@ -17,7 +17,11 @@ use windows::core::{factory, w};
 use windows::Security::Credentials::UI::{
     UserConsentVerificationResult, UserConsentVerifier, UserConsentVerifierAvailability,
 };
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::RemoteDesktop::{
+    WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
+};
 use windows::Win32::System::WinRT::IUserConsentVerifierInterop;
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -25,9 +29,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_F4, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, FindWindowExW, FindWindowW, IsWindowVisible, SetWindowsHookExW, ShowWindow,
-    UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, KBDLLHOOKSTRUCT_FLAGS, LLKHF_ALTDOWN, SW_HIDE,
-    SW_SHOW, WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    FindWindowExW, FindWindowW, GetMessageW, IsWindowVisible, PostQuitMessage, RegisterClassW,
+    SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, UnregisterClassW,
+    HHOOK, HWND_MESSAGE, KBDLLHOOKSTRUCT, KBDLLHOOKSTRUCT_FLAGS, LLKHF_ALTDOWN, MSG,
+    PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, SW_HIDE, SW_SHOW, WH_KEYBOARD_LL,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_KEYDOWN, WM_POWERBROADCAST,
+    WM_SYSKEYDOWN, WM_WTSSESSION_CHANGE, WNDCLASSW, WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
 };
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 
@@ -49,6 +57,8 @@ static LOCK_STATE: LazyLock<Mutex<LockState>> = LazyLock::new(|| Mutex::new(Lock
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 static APP_SETTINGS: LazyLock<Mutex<AppSettings>> =
     LazyLock::new(|| Mutex::new(AppSettings::default()));
+static AUTO_LOCK_WATCHER_SIGNAL: LazyLock<(Mutex<u64>, Condvar)> =
+    LazyLock::new(|| (Mutex::new(0), Condvar::new()));
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const SETTINGS_WINDOW_LABEL: &str = "settings";
@@ -231,6 +241,25 @@ fn current_settings() -> AppSettings {
     APP_SETTINGS.lock().unwrap().clone()
 }
 
+fn reset_auto_lock_baseline() {
+    LOCK_STATE.lock().unwrap().last_auto_lock_input_tick = current_system_idle_state()
+        .ok()
+        .map(|(_, last_input_tick)| last_input_tick);
+}
+
+fn notify_auto_lock_watcher() {
+    let (signal_mutex, signal) = &*AUTO_LOCK_WATCHER_SIGNAL;
+    let mut generation = signal_mutex.lock().unwrap();
+    *generation = generation.wrapping_add(1);
+    signal.notify_all();
+}
+
+fn wait_for_auto_lock_signal(timeout: Duration) {
+    let (signal_mutex, signal) = &*AUTO_LOCK_WATCHER_SIGNAL;
+    let generation = signal_mutex.lock().unwrap();
+    let _ = signal.wait_timeout(generation, timeout).unwrap();
+}
+
 fn current_system_idle_state() -> Result<(u64, u32), String> {
     let mut info = LASTINPUTINFO {
         cbSize: size_of::<LASTINPUTINFO>() as u32,
@@ -249,12 +278,144 @@ fn current_system_idle_state() -> Result<(u64, u32), String> {
     Ok((idle_millis / 1000, last_input_tick))
 }
 
+fn restore_lock_window_after_system_resume(reason: &str) {
+    let is_locked = LOCK_STATE.lock().unwrap().is_locked;
+    if !is_locked {
+        return;
+    }
+
+    if let Some(app) = APP_HANDLE.get().cloned() {
+        let app_handle = app.clone();
+        if let Err(error) = app.run_on_main_thread(move || {
+            set_lock_windows_topmost(&app_handle, true, true);
+        }) {
+            eprintln!("failed to restore lock window after {reason}: {error}");
+        }
+    }
+}
+
+fn handle_system_resume() {
+    reset_auto_lock_baseline();
+    notify_auto_lock_watcher();
+    restore_lock_window_after_system_resume("power resume");
+}
+
+fn handle_session_transition(event_code: u32) {
+    match event_code {
+        WTS_SESSION_LOCK => {
+            reset_auto_lock_baseline();
+            notify_auto_lock_watcher();
+        }
+        WTS_SESSION_UNLOCK => {
+            reset_auto_lock_baseline();
+            notify_auto_lock_watcher();
+            restore_lock_window_after_system_resume("session unlock");
+        }
+        _ => {}
+    }
+}
+
+unsafe extern "system" fn system_event_window_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_POWERBROADCAST => {
+            let event_code = wparam.0 as u32;
+            if event_code == PBT_APMRESUMEAUTOMATIC || event_code == PBT_APMRESUMESUSPEND {
+                handle_system_resume();
+            }
+            LRESULT(1)
+        }
+        WM_WTSSESSION_CHANGE => {
+            handle_session_transition(wparam.0 as u32);
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            PostQuitMessage(0);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn start_system_event_watcher() {
+    thread::spawn(|| unsafe {
+        let class_name = w!("QylockSystemEvents");
+        let instance = match GetModuleHandleW(None) {
+            Ok(module) => HINSTANCE(module.0),
+            Err(error) => {
+                eprintln!("failed to get module handle for system event watcher: {error}");
+                return;
+            }
+        };
+
+        let window_class = WNDCLASSW {
+            lpfnWndProc: Some(system_event_window_proc),
+            hInstance: instance,
+            lpszClassName: class_name,
+            ..Default::default()
+        };
+
+        if RegisterClassW(&window_class) == 0 {
+            eprintln!("failed to register system event watcher window class");
+            return;
+        }
+
+        let hwnd = match CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            class_name,
+            w!("qylock-system-events"),
+            WINDOW_STYLE::default(),
+            0,
+            0,
+            0,
+            0,
+            Some(HWND_MESSAGE),
+            None,
+            Some(instance),
+            None,
+        ) {
+            Ok(hwnd) => hwnd,
+            Err(error) => {
+                eprintln!("failed to create system event watcher window: {error}");
+                let _ = UnregisterClassW(class_name, Some(instance));
+                return;
+            }
+        };
+
+        if let Err(error) = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) {
+            eprintln!("failed to register session notifications: {error}");
+        }
+
+        let mut message = MSG::default();
+        loop {
+            let result = GetMessageW(&mut message, None, 0, 0).0;
+            if result == -1 {
+                eprintln!("system event watcher message loop failed");
+                break;
+            }
+            if result == 0 {
+                break;
+            }
+            let _ = TranslateMessage(&message);
+            let _ = DispatchMessageW(&message);
+        }
+
+        let _ = DestroyWindow(hwnd);
+        let _ = UnregisterClassW(class_name, Some(instance));
+    });
+}
+
 fn start_auto_lock_watcher(app: AppHandle) {
     thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(2));
-
         let settings = current_settings();
-        if settings.auto_lock_timeout_seconds == 0 {
+        let is_locked = LOCK_STATE.lock().unwrap().is_locked;
+
+        if settings.auto_lock_timeout_seconds == 0 || is_locked {
+            wait_for_auto_lock_signal(Duration::from_secs(5));
             continue;
         }
 
@@ -262,6 +423,7 @@ fn start_auto_lock_watcher(app: AppHandle) {
             Ok(state) => state,
             Err(error) => {
                 eprintln!("{error}");
+                wait_for_auto_lock_signal(Duration::from_secs(2));
                 continue;
             }
         };
@@ -287,7 +449,12 @@ fn start_auto_lock_watcher(app: AppHandle) {
             }) {
                 eprintln!("failed to schedule idle auto-lock on main thread: {error}");
             }
+            wait_for_auto_lock_signal(Duration::from_millis(250));
+            continue;
         }
+
+        let remaining_seconds = settings.auto_lock_timeout_seconds.saturating_sub(idle_seconds);
+        wait_for_auto_lock_signal(Duration::from_secs(remaining_seconds.clamp(1, 2)));
     });
 }
 
@@ -473,7 +640,7 @@ fn ensure_aux_window(app: &AppHandle, label: &str, monitor: &Monitor) -> Result<
         existing
     } else {
         WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
-            .title("Pixel Skyscrapers Lock Screen")
+            .title("qylock 잠금 화면")
             .decorations(false)
             .resizable(false)
             .transparent(true)
@@ -542,6 +709,9 @@ fn unlock_and_unhook(app: &AppHandle) {
     let aux_window_labels = {
         let mut state = LOCK_STATE.lock().unwrap();
         state.is_locked = false;
+        state.last_auto_lock_input_tick = current_system_idle_state()
+            .ok()
+            .map(|(_, last_input_tick)| last_input_tick);
         std::mem::take(&mut state.aux_window_labels)
     };
 
@@ -555,6 +725,7 @@ fn unlock_and_unhook(app: &AppHandle) {
 
     destroy_aux_windows(app, &aux_window_labels);
     let _ = app.emit("lock-state-changed", false);
+    notify_auto_lock_watcher();
 }
 
 fn quit_app(app: &AppHandle) {
@@ -610,6 +781,7 @@ fn lock_screen_impl(app: &AppHandle) -> Result<(), String> {
     state.aux_window_labels = aux_window_labels;
     drop(state);
     let _ = app.emit("lock-state-changed", true);
+    notify_auto_lock_watcher();
 
     Ok(())
 }
@@ -626,7 +798,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
     let mut tray_builder = TrayIconBuilder::with_id("main-tray")
         .menu(&tray_menu)
-        .tooltip(format!("qylock-windows ({LOCK_SHORTCUT_LABEL})"))
+        .tooltip(format!("qylock ({LOCK_SHORTCUT_LABEL})"))
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| {
             if event.id == TRAY_SETTINGS_ID {
@@ -649,7 +821,6 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let _ = tray_builder.build(app)?;
     Ok(())
 }
-
 #[tauri::command]
 async fn verify_hello(app: AppHandle) -> Result<bool, String> {
     let availability = UserConsentVerifier::CheckAvailabilityAsync()
@@ -689,7 +860,7 @@ async fn verify_hello(app: AppHandle) -> Result<bool, String> {
             interop
                 .RequestVerificationForWindowAsync::<windows_future::IAsyncOperation<UserConsentVerificationResult>>(
                     hwnd,
-                    &"Unlock Pixel Skyscrapers".into(),
+                    &"qylock 잠금 해제".into(),
                 )
         }
         .map_err(|error| format!("failed to open Windows Hello prompt: {error}"))?
@@ -778,8 +949,11 @@ fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
         *state = settings.clone();
     }
     if previous_settings.auto_lock_timeout_seconds != settings.auto_lock_timeout_seconds {
-        LOCK_STATE.lock().unwrap().last_auto_lock_input_tick = None;
+        LOCK_STATE.lock().unwrap().last_auto_lock_input_tick = current_system_idle_state()
+            .ok()
+            .map(|(_, last_input_tick)| last_input_tick);
     }
+    notify_auto_lock_watcher();
     app.emit("settings-updated", settings)
         .map_err(|error| format!("failed to emit settings update event: {error}"))?;
     Ok(())
@@ -837,6 +1011,7 @@ pub fn run() {
                 let _ = window.set_content_protected(true);
                 let _ = window.set_shadow(false);
             }
+            start_system_event_watcher();
             start_auto_lock_watcher(app.handle().clone());
             build_tray(app.handle())?;
             Ok(())
@@ -844,3 +1019,5 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
