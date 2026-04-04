@@ -11,6 +11,8 @@
           "emergency_unlock",
           "close_app",
           "get_lock_state",
+          "get_now_playing_snapshot",
+          "control_now_playing",
           "hide_settings_window",
           "get_settings",
           "save_settings"

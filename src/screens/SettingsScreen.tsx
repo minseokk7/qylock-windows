@@ -5,11 +5,16 @@ import { type MouseEvent as ReactMouseEvent, useEffect, useState } from "react";
 import SettingsDropdown from "../components/SettingsDropdown";
 import { type AppSettings, defaultSettings } from "../app-settings";
 
+type ToastState = {
+  message: string;
+  tone: "success" | "error";
+};
+
 function SettingsScreen() {
   const currentWindow = getCurrentWindow();
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [isSaving, setIsSaving] = useState(false);
-  const [status, setStatus] = useState("");
+  const [toast, setToast] = useState<ToastState | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -37,6 +42,20 @@ function SettingsScreen() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!toast) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setToast(null);
+    }, 2200);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [toast]);
+
   const handleSave = async () => {
     const normalizedSettings: AppSettings = {
       autoLockTimeoutSeconds: Math.max(
@@ -51,28 +70,28 @@ function SettingsScreen() {
     };
 
     setIsSaving(true);
-    setStatus("");
+    setToast(null);
 
     try {
       await invoke("save_settings", { settings: normalizedSettings });
       setSettings(normalizedSettings);
-      setStatus("설정을 저장했습니다.");
+      setToast({ message: "설정을 저장했습니다.", tone: "success" });
     } catch (error) {
       console.error(error);
-      setStatus("설정을 저장하지 못했습니다.");
+      setToast({ message: "설정을 저장하지 못했습니다.", tone: "error" });
     } finally {
       setIsSaving(false);
     }
   };
 
   const handleHide = async () => {
-    setStatus("");
+    setToast(null);
 
     try {
       await invoke("hide_settings_window");
     } catch (error) {
       console.error(error);
-      setStatus("설정 창을 숨기지 못했습니다.");
+      setToast({ message: "설정 창을 숨기지 못했습니다.", tone: "error" });
     }
   };
 
@@ -95,6 +114,12 @@ function SettingsScreen() {
   return (
     <div className="settings-shell">
       <div className="settings-panel">
+        {toast ? (
+          <div className={`settings-toast is-${toast.tone}`} role="status" aria-live="polite">
+            {toast.message}
+          </div>
+        ) : null}
+
         <div className="settings-header">
           <div className="settings-window-bar">
             <div
@@ -224,8 +249,6 @@ function SettingsScreen() {
             트레이로 숨기기
           </button>
         </div>
-
-        {status ? <p className="settings-status">{status}</p> : null}
       </div>
     </div>
   );

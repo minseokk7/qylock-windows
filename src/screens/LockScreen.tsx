@@ -1,23 +1,71 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { useEffect, useRef, useState } from "react";
-import {
-  type AppSettings,
-  defaultSettings,
-  formatBlackoutLabel,
-} from "../app-settings";
+import type { MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { type AppSettings, defaultSettings } from "../app-settings";
 
 type LockScreenProps = {
   isMainLockWindow: boolean;
 };
 
+type NowPlayingInfo = {
+  sourceKind: string;
+  title: string;
+  artist: string;
+  album: string;
+  thumbnail: string | null;
+  status: string;
+  positionMs: number;
+  durationMs: number;
+  updatedAt: number;
+};
+
+type MediaControlAction = "previous" | "togglePlayPause" | "next";
+
+function formatPlaybackStatus(status: string) {
+  switch (status) {
+    case "playing":
+      return "\uC7AC\uC0DD \uC911";
+    case "paused":
+      return "\uC77C\uC2DC\uC815\uC9C0";
+    default:
+      return "\uB300\uAE30 \uC911";
+  }
+}
+
 function LockScreen({ isMainLockWindow }: LockScreenProps) {
   const [time, setTime] = useState(new Date());
-  const [settings, setSettings] = useState<AppSettings>(defaultSettings);
+  const [, setSettings] = useState<AppSettings>(defaultSettings);
   const [isBlackout, setIsBlackout] = useState(false);
+  const [nowPlaying, setNowPlaying] = useState<NowPlayingInfo | null>(null);
+  const [displayPositionMs, setDisplayPositionMs] = useState(0);
   const blackoutTimerRef = useRef<number | null>(null);
   const blackoutSecondsRef = useRef(0);
   const isLockedRef = useRef(false);
+
+  const handleMediaControl = async (
+    action: MediaControlAction,
+    event: MouseEvent<HTMLButtonElement>,
+  ) => {
+    event.stopPropagation();
+
+    try {
+      await invoke<boolean>("control_now_playing", { action });
+    } catch (error) {
+      console.error("Failed to control media session:", error);
+    }
+  };
+
+  const progressRatio = useMemo(() => {
+    if (!nowPlaying || nowPlaying.durationMs <= 0) {
+      return 0;
+    }
+
+    return Math.max(
+      0,
+      Math.min(100, (displayPositionMs / nowPlaying.durationMs) * 100),
+    );
+  }, [displayPositionMs, nowPlaying]);
 
   const clearBlackoutTimer = () => {
     if (blackoutTimerRef.current !== null) {
@@ -46,6 +94,65 @@ function LockScreen({ isMainLockWindow }: LockScreenProps) {
 
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    let unlistenMedia: UnlistenFn | null = null;
+
+    void invoke<NowPlayingInfo | null>("get_now_playing_snapshot")
+      .then((snapshot) => {
+        if (active) {
+          setNowPlaying(snapshot);
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to read now playing snapshot:", error);
+        if (active) {
+          setNowPlaying(null);
+        }
+      });
+
+    void listen<NowPlayingInfo | null>("media-now-playing-updated", (event) => {
+      if (active) {
+        setNowPlaying(event.payload);
+      }
+    }).then((unlisten) => {
+      unlistenMedia = unlisten;
+    });
+
+    return () => {
+      active = false;
+      if (unlistenMedia) {
+        void unlistenMedia();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!nowPlaying) {
+      setDisplayPositionMs(0);
+      return;
+    }
+
+    const syncDisplayedPosition = () => {
+      if (nowPlaying.status !== "playing") {
+        setDisplayPositionMs(nowPlaying.positionMs);
+        return;
+      }
+
+      const elapsed = Math.max(0, Date.now() - nowPlaying.updatedAt);
+      const nextPosition = Math.min(
+        nowPlaying.durationMs || Number.MAX_SAFE_INTEGER,
+        nowPlaying.positionMs + elapsed,
+      );
+      setDisplayPositionMs(nextPosition);
+    };
+
+    syncDisplayedPosition();
+    const intervalId = window.setInterval(syncDisplayedPosition, 250);
+
+    return () => window.clearInterval(intervalId);
+  }, [nowPlaying]);
 
   useEffect(() => {
     let active = true;
@@ -152,13 +259,100 @@ function LockScreen({ isMainLockWindow }: LockScreenProps) {
           })}
         </div>
 
-        <div className="unlock-prompt" onClick={handleUnlock}>
-          TAP TO UNLOCK
-        </div>
+        <div className="lock-actions">
+          <div className="unlock-prompt" onClick={handleUnlock}>
+            TAP TO UNLOCK
+          </div>
 
-        {settings.blackoutTimeoutSeconds > 0 ? (
-          <div className="timeout-note">{formatBlackoutLabel(settings.blackoutTimeoutSeconds)}</div>
-        ) : null}
+          {nowPlaying ? (
+            <div
+              className="now-playing"
+              aria-live="polite"
+              onClick={(event) => event.stopPropagation()}
+              onDoubleClick={(event) => event.stopPropagation()}
+            >
+              <div className="now-playing-art">
+                {nowPlaying.thumbnail ? (
+                  <img
+                    className="now-playing-art-image"
+                    src={nowPlaying.thumbnail}
+                    alt={`${nowPlaying.title} \uC568\uBC94 \uC544\uD2B8`}
+                  />
+                ) : (
+                  <div className="now-playing-art-placeholder">TIDAL</div>
+                )}
+              </div>
+
+              <div className="now-playing-body">
+                <div className="now-playing-topline">
+                  <span className="now-playing-app">TIDAL</span>
+                  <span
+                    className={`now-playing-status is-${nowPlaying.status}`}
+                  >
+                    {formatPlaybackStatus(nowPlaying.status)}
+                  </span>
+                </div>
+
+                <div className="now-playing-title">{nowPlaying.title}</div>
+
+                {nowPlaying.artist ? (
+                  <div className="now-playing-artist">{nowPlaying.artist}</div>
+                ) : null}
+
+                {nowPlaying.album ? (
+                  <div className="now-playing-album">{nowPlaying.album}</div>
+                ) : null}
+
+                {nowPlaying.durationMs > 0 ? (
+                  <div className="now-playing-progress">
+                    <div
+                      className="now-playing-progress-fill"
+                      style={{ width: `${progressRatio}%` }}
+                    />
+                  </div>
+                ) : null}
+
+                <div className="now-playing-controls">
+                  <button
+                    className="now-playing-control-button"
+                    type="button"
+                    aria-label="이전 곡"
+                    onClick={(event) => void handleMediaControl("previous", event)}
+                  >
+                    <span className="media-icon media-icon-previous" aria-hidden="true" />
+                  </button>
+                  <button
+                    className="now-playing-control-button is-primary"
+                    type="button"
+                    aria-label={
+                      nowPlaying.status === "playing" ? "일시정지" : "재생"
+                    }
+                    onClick={(event) =>
+                      void handleMediaControl("togglePlayPause", event)
+                    }
+                  >
+                    <span
+                      className={`media-icon ${
+                        nowPlaying.status === "playing"
+                          ? "media-icon-pause"
+                          : "media-icon-play"
+                      }`}
+                      aria-hidden="true"
+                    />
+                  </button>
+                  <button
+                    className="now-playing-control-button"
+                    type="button"
+                    aria-label="다음 곡"
+                    onClick={(event) => void handleMediaControl("next", event)}
+                  >
+                    <span className="media-icon media-icon-next" aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </div>
       </div>
 
       {isBlackout ? <div className="blackout-layer" /> : null}
