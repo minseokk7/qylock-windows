@@ -1,9 +1,12 @@
 [package]
 name = "qylock-windows"
 version = "0.1.1"
-description = "A Tauri App"
-authors = ["you"]
+description = "Windows tray lock screen app built with Tauri and React."
+authors = ["minseok"]
 edition = "2021"
+license = "GPL-3.0-only"
+repository = "https://github.com/minseokk7/qylock-windows"
+homepage = "https://github.com/minseokk7/qylock-windows"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

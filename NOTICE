@@ -1,0 +1,26 @@
+qylock-windows
+
+This project is based on:
+https://github.com/Darkkal44/qylock
+
+Original project:
+- Name: qylock
+- Author: Darkkal44
+- License: GNU General Public License v3.0
+
+This repository contains a modified Windows-oriented derivative work.
+
+Modifications in this repository include:
+- Porting the project to a Windows desktop application using Tauri and React
+- Adding a tray-based settings window and Windows Hello unlock flow
+- Adding Windows startup integration and idle auto-lock behavior
+- Adding release packaging for Windows installers
+
+Modified by:
+- minseok
+
+Modification notice date:
+- 2026-04-04
+
+This modified version is distributed under the GNU General Public License v3.0 only.
+See the LICENSE file for the full license text.
