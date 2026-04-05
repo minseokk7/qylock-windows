@@ -1,11 +1,16 @@
 import { createPortal } from "react-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { type MenuPosition, minuteOptions } from "../app-settings";
+import {
+  type MenuPosition,
+  type SettingsOption,
+  minuteOptions,
+} from "../app-settings";
 
 type SettingsDropdownProps = {
-  valueMinutes: number;
-  onChange: (minutes: number) => void;
+  value: string | number;
+  onChange: (value: string | number) => void;
   ariaLabel: string;
+  options?: SettingsOption[];
 };
 
 const menuGap = 10;
@@ -13,9 +18,10 @@ const viewportPadding = 16;
 const minMenuHeight = 180;
 
 function SettingsDropdown({
-  valueMinutes,
+  value,
   onChange,
   ariaLabel,
+  options = minuteOptions,
 }: SettingsDropdownProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null);
@@ -24,8 +30,8 @@ function SettingsDropdown({
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   const selectedOption = useMemo(
-    () => minuteOptions.find((option) => option.value === valueMinutes) ?? minuteOptions[0],
-    [valueMinutes],
+    () => options.find((option) => option.value === value) ?? options[0],
+    [options, value],
   );
 
   useEffect(() => {
@@ -113,7 +119,7 @@ function SettingsDropdown({
                 maxHeight: `${menuPosition.maxHeight}px`,
               }}
             >
-              {minuteOptions.map((option) => {
+              {options.map((option) => {
                 const selected = option.value === selectedOption.value;
 
                 return (

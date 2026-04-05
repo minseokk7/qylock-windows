@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { type MouseEvent as ReactMouseEvent, useEffect, useState } from "react";
 import SettingsDropdown from "../components/SettingsDropdown";
@@ -10,11 +11,42 @@ type ToastState = {
   tone: "success" | "error";
 };
 
+type UpdateCheckResult = {
+  currentVersion: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+  releaseUrl: string;
+  publishedAt: string | null;
+  releaseName: string | null;
+  summary: string | null;
+};
+
+function formatPublishedDate(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat("ko-KR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
 function SettingsScreen() {
   const currentWindow = getCurrentWindow();
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [isSaving, setIsSaving] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
+  const [isShortcutHelpOpen, setIsShortcutHelpOpen] = useState(false);
+  const [currentVersion, setCurrentVersion] = useState("");
+  const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -23,6 +55,12 @@ function SettingsScreen() {
     void invoke<AppSettings>("get_settings").then((nextSettings) => {
       if (active) {
         setSettings(nextSettings);
+      }
+    });
+
+    void invoke<string>("get_app_version").then((version) => {
+      if (active) {
+        setCurrentVersion(version);
       }
     });
 
@@ -67,6 +105,7 @@ function SettingsScreen() {
         Math.min(3600, Math.floor(settings.blackoutTimeoutSeconds || 0)),
       ),
       launchOnStartup: Boolean(settings.launchOnStartup),
+      mediaBridgeEnabled: Boolean(settings.mediaBridgeEnabled),
     };
 
     setIsSaving(true);
@@ -75,10 +114,16 @@ function SettingsScreen() {
     try {
       await invoke("save_settings", { settings: normalizedSettings });
       setSettings(normalizedSettings);
-      setToast({ message: "설정을 저장했습니다.", tone: "success" });
+      setToast({
+        message: "\uC124\uC815\uC774 \uC800\uC7A5\uB418\uC5C8\uC2B5\uB2C8\uB2E4.",
+        tone: "success",
+      });
     } catch (error) {
       console.error(error);
-      setToast({ message: "설정을 저장하지 못했습니다.", tone: "error" });
+      setToast({
+        message: "\uC124\uC815\uC744 \uC800\uC7A5\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.",
+        tone: "error",
+      });
     } finally {
       setIsSaving(false);
     }
@@ -86,18 +131,62 @@ function SettingsScreen() {
 
   const handleHide = async () => {
     setToast(null);
+    setIsShortcutHelpOpen(false);
 
     try {
       await invoke("hide_settings_window");
     } catch (error) {
       console.error(error);
-      setToast({ message: "설정 창을 숨기지 못했습니다.", tone: "error" });
+      setToast({
+        message: "\uC124\uC815 \uCC3D\uC744 \uC228\uAE30\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.",
+        tone: "error",
+      });
     }
   };
 
   const handleLockNow = async () => {
     await invoke("lock_screen");
     await currentWindow.hide();
+  };
+
+  const handleCheckForUpdates = async () => {
+    setIsCheckingUpdate(true);
+    setToast(null);
+
+    try {
+      const result = await invoke<UpdateCheckResult>("check_for_updates");
+      setUpdateResult(result);
+      setCurrentVersion(result.currentVersion);
+      setToast({
+        message: result.updateAvailable
+          ? `새 버전 ${result.latestVersion}을 사용할 수 있습니다.`
+          : "이미 최신 버전을 사용 중입니다.",
+        tone: "success",
+      });
+    } catch (error) {
+      console.error(error);
+      setToast({
+        message: "업데이트를 확인하지 못했습니다.",
+        tone: "error",
+      });
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  };
+
+  const handleOpenReleasePage = async () => {
+    const releaseUrl =
+      updateResult?.releaseUrl ?? "https://github.com/minseokk7/qylock-windows/releases/latest";
+
+    try {
+      await openUrl(releaseUrl);
+    } catch (error) {
+      console.error(error);
+      setToast({
+        message: "다운로드 페이지를 열지 못했습니다.",
+        tone: "error",
+      });
+    }
   };
 
   const handleDragMouseDown = (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -127,14 +216,23 @@ function SettingsScreen() {
               data-tauri-drag-region
               onMouseDown={handleDragMouseDown}
               aria-hidden="true"
-              title="창 이동"
+              title={"\uCC3D \uC774\uB3D9"}
             />
 
             <div className="settings-window-actions">
               <button
                 type="button"
+                className={`settings-header-button${isShortcutHelpOpen ? " is-active" : ""}`}
+                aria-label={"\uB2E8\uCD95\uD0A4 \uBCF4\uAE30"}
+                aria-expanded={isShortcutHelpOpen}
+                onClick={() => setIsShortcutHelpOpen((current) => !current)}
+              >
+                ?
+              </button>
+              <button
+                type="button"
                 className="settings-header-button"
-                aria-label="최소화"
+                aria-label={"\uCD5C\uC18C\uD654"}
                 onClick={() => void currentWindow.minimize()}
               >
                 -
@@ -142,11 +240,25 @@ function SettingsScreen() {
               <button
                 type="button"
                 className="settings-header-button is-close"
-                aria-label="닫기"
+                aria-label={"\uB2EB\uAE30"}
                 onClick={() => void handleHide()}
               >
                 x
               </button>
+
+              {isShortcutHelpOpen ? (
+                <div className="settings-shortcut-popover" role="dialog" aria-label={"단축키"}>
+                  <p className="settings-shortcut-title">{"\uB2E8\uCD95\uD0A4"}</p>
+                  <div className="settings-shortcut-row">
+                    <span>{"\uC7A0\uAE08"}</span>
+                    <strong>Ctrl+Alt+L</strong>
+                  </div>
+                  <div className="settings-shortcut-row">
+                    <span>{"\uC7A0\uAE08 + \uB514\uC2A4\uD50C\uB808\uC774 \uB044\uAE30"}</span>
+                    <strong>Ctrl+Alt+O</strong>
+                  </div>
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -156,97 +268,177 @@ function SettingsScreen() {
             onMouseDown={handleDragMouseDown}
           >
             <p className="settings-kicker">qylock</p>
-            <h1>설정</h1>
+            <h1>{"\uC124\uC815"}</h1>
             <p className="settings-subtitle">
-              시스템 트레이에서 창을 열어 잠금 동작을 조정할 수 있습니다.
+              {
+                "\uC2DC\uC2A4\uD15C \uD2B8\uB808\uC774\uC5D0\uC11C \uCC3D\uC744 \uC5F4\uC5B4 \uC7A0\uAE08 \uB3D9\uC791\uC744 \uC870\uC815\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4."
+              }
             </p>
           </div>
         </div>
 
-        <div className="settings-card">
-          <label className="settings-label" htmlFor="hotkey">
-            잠금 단축키
-          </label>
-          <input
-            id="hotkey"
-            className="settings-input is-readonly"
-            value="Ctrl+Alt+L"
-            readOnly
-          />
-          <p className="settings-help">
-            qylock이 트레이에 실행 중일 때 누르면 잠금 화면이 열립니다.
-          </p>
-        </div>
-
-        <div className="settings-card">
-          <label className="settings-label">자동 잠금</label>
-          <SettingsDropdown
-            valueMinutes={Math.floor(settings.autoLockTimeoutSeconds / 60)}
-            onChange={(minutes) =>
-              setSettings((current) => ({
-                ...current,
-                autoLockTimeoutSeconds: minutes * 60,
-              }))
-            }
-            ariaLabel="자동 잠금"
-          />
-          <p className="settings-help">
-            마지막 입력 후 설정한 시간이 지나면 qylock이 자동으로 잠금 화면을 엽니다.
-          </p>
-        </div>
-
-        <div className="settings-card">
-          <label className="settings-label">잠금 후 검은 화면 켜기</label>
-          <SettingsDropdown
-            valueMinutes={Math.floor(settings.blackoutTimeoutSeconds / 60)}
-            onChange={(minutes) =>
-              setSettings((current) => ({
-                ...current,
-                blackoutTimeoutSeconds: minutes * 60,
-              }))
-            }
-            ariaLabel="잠금 후 검은 화면 켜기"
-          />
-          <p className="settings-help">
-            설정한 시간이 지나면 잠금 화면이 검은 화면으로 전환됩니다.
-          </p>
-        </div>
-
-        <div className="settings-card">
-          <div className="settings-toggle">
-            <div className="settings-toggle-copy">
-              <span className="settings-label">실행 시 자동으로 켜짐</span>
-              <p className="settings-help">
-                Windows 로그인 후 qylock이 자동 실행되어 트레이에서 대기합니다.
-              </p>
+        <div className="settings-grid">
+          <div className="settings-card settings-card-update">
+            <div className="settings-update-header">
+              <div>
+                <span className="settings-label">{"업데이트"}</span>
+                <p className="settings-help">
+                  {currentVersion
+                    ? `현재 버전 qylock ${currentVersion}`
+                    : "현재 버전을 확인하는 중입니다."}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="settings-button settings-button-inline"
+                onClick={() => void handleCheckForUpdates()}
+                disabled={isCheckingUpdate}
+              >
+                {isCheckingUpdate ? "확인 중.." : "업데이트 확인"}
+              </button>
             </div>
-            <button
-              type="button"
-              className={`settings-switch${settings.launchOnStartup ? " is-on" : ""}`}
-              role="switch"
-              aria-checked={settings.launchOnStartup}
-              aria-label="실행 시 자동으로 켜짐"
-              onClick={() =>
+
+            {updateResult ? (
+              <div className="settings-update-body">
+                <p className="settings-update-status">
+                  {updateResult.updateAvailable
+                    ? `새 버전 ${updateResult.latestVersion} 사용 가능`
+                    : `최신 버전 ${updateResult.latestVersion} 사용 중`}
+                </p>
+                {updateResult.releaseName ? (
+                  <p className="settings-help">{updateResult.releaseName}</p>
+                ) : null}
+                {updateResult.summary ? (
+                  <p className="settings-help">{updateResult.summary}</p>
+                ) : null}
+                {updateResult.publishedAt ? (
+                  <p className="settings-help">
+                    {`배포일 ${formatPublishedDate(updateResult.publishedAt)}`}
+                  </p>
+                ) : null}
+                <div className="settings-update-actions">
+                  <button
+                    type="button"
+                    className="settings-button"
+                    onClick={() => void handleOpenReleasePage()}
+                  >
+                    {"다운로드 열기"}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="settings-card settings-card-feature">
+            <label className="settings-label">{"\uC790\uB3D9 \uC7A0\uAE08"}</label>
+            <SettingsDropdown
+              value={Math.floor(settings.autoLockTimeoutSeconds / 60)}
+              onChange={(minutes) =>
                 setSettings((current) => ({
                   ...current,
-                  launchOnStartup: !current.launchOnStartup,
+                  autoLockTimeoutSeconds: Number(minutes) * 60,
                 }))
               }
-            >
-              <span className="settings-switch-thumb" />
-            </button>
+              ariaLabel={"\uC790\uB3D9 \uC7A0\uAE08"}
+            />
+            <p className="settings-help">
+              {
+                "\uB9C8\uC9C0\uB9C9 \uC785\uB825 \uD6C4 \uC124\uC815\uD55C \uC2DC\uAC04\uC774 \uC9C0\uB098\uBA74 qylock\uC774 \uC790\uB3D9\uC73C\uB85C \uC7A0\uAE08 \uD654\uBA74\uC744 \uC5FD\uB2C8\uB2E4."
+              }
+            </p>
+          </div>
+
+          <div className="settings-card settings-card-feature">
+            <label className="settings-label">
+              {"\uC7A0\uAE08 \uD6C4 \uB514\uC2A4\uD50C\uB808\uC774 \uB044\uAE30"}
+            </label>
+            <SettingsDropdown
+              value={Math.floor(settings.blackoutTimeoutSeconds / 60)}
+              onChange={(minutes) =>
+                setSettings((current) => ({
+                  ...current,
+                  blackoutTimeoutSeconds: Number(minutes) * 60,
+                }))
+              }
+              ariaLabel={"\uC7A0\uAE08 \uD6C4 \uB514\uC2A4\uD50C\uB808\uC774 \uB044\uAE30"}
+            />
+            <p className="settings-help">
+              {
+                "\uC124\uC815\uD55C \uC2DC\uAC04\uC774 \uC9C0\uB098\uBA74 Windows \uB514\uC2A4\uD50C\uB808\uC774 \uB044\uAE30 \uC2E0\uD638\uB97C \uBCF4\uB0C5\uB2C8\uB2E4."
+              }
+            </p>
+          </div>
+
+          <div className="settings-card settings-card-toggle">
+            <div className="settings-toggle">
+              <div className="settings-toggle-copy">
+                <span className="settings-label">
+                  {"\uC2E4\uD589 \uC2DC \uC790\uB3D9\uC73C\uB85C \uCF1C\uC9D0"}
+                </span>
+                <p className="settings-help">
+                  {
+                    "Windows \uB85C\uADF8\uC778 \uD6C4 qylock\uC774 \uC790\uB3D9 \uC2E4\uD589\uB418\uC5B4 \uD2B8\uB808\uC774\uC5D0\uC11C \uB300\uAE30\uD569\uB2C8\uB2E4."
+                  }
+                </p>
+              </div>
+              <button
+                type="button"
+                className={`settings-switch${settings.launchOnStartup ? " is-on" : ""}`}
+                role="switch"
+                aria-checked={settings.launchOnStartup}
+                aria-label={"\uC2E4\uD589 \uC2DC \uC790\uB3D9\uC73C\uB85C \uCF1C\uC9D0"}
+                onClick={() =>
+                  setSettings((current) => ({
+                    ...current,
+                    launchOnStartup: !current.launchOnStartup,
+                  }))
+                }
+              >
+                <span className="settings-switch-thumb" />
+              </button>
+            </div>
+          </div>
+
+          <div className="settings-card settings-card-toggle">
+            <div className="settings-toggle">
+              <div className="settings-toggle-copy">
+                <span className="settings-label">
+                  {"\uD604\uC7AC \uC7AC\uC0DD \uC815\uBCF4 \uD45C\uC2DC"}
+                </span>
+                <p className="settings-help">
+                  {
+                    "\uC7A0\uAE08 \uD654\uBA74\uC5D0\uC11C TIDAL \uD604\uC7AC \uC7AC\uC0DD \uC815\uBCF4\uC640 \uBBF8\uB514\uC5B4 \uCEE8\uD2B8\uB864\uC744 \uD45C\uC2DC\uD569\uB2C8\uB2E4."
+                  }
+                </p>
+              </div>
+              <button
+                type="button"
+                className={`settings-switch${settings.mediaBridgeEnabled ? " is-on" : ""}`}
+                role="switch"
+                aria-checked={settings.mediaBridgeEnabled}
+                aria-label={"\uD604\uC7AC \uC7AC\uC0DD \uC815\uBCF4 \uD45C\uC2DC"}
+                onClick={() =>
+                  setSettings((current) => ({
+                    ...current,
+                    mediaBridgeEnabled: !current.mediaBridgeEnabled,
+                  }))
+                }
+              >
+                <span className="settings-switch-thumb" />
+              </button>
+            </div>
           </div>
         </div>
 
         <div className="settings-actions">
           <button className="settings-button primary" onClick={handleSave} disabled={isSaving}>
-            {isSaving ? "저장 중..." : "저장"}
+            {isSaving ? "\uC800\uC7A5 \uC911.." : "\uC800\uC7A5"}
           </button>
           <button className="settings-button" onClick={handleLockNow}>
-            지금 잠그기
+            {"\uC9C0\uAE08 \uC7A0\uAE08\uD558\uAE30"}
           </button>
           <button className="settings-button" onClick={() => void handleHide()}>
-            트레이로 숨기기
+            {"\uD2B8\uB808\uC774\uB85C \uC228\uAE30\uAE30"}
           </button>
         </div>
       </div>

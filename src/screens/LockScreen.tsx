@@ -36,7 +36,6 @@ function formatPlaybackStatus(status: string) {
 function LockScreen({ isMainLockWindow }: LockScreenProps) {
   const [time, setTime] = useState(new Date());
   const [, setSettings] = useState<AppSettings>(defaultSettings);
-  const [isBlackout, setIsBlackout] = useState(false);
   const [nowPlaying, setNowPlaying] = useState<NowPlayingInfo | null>(null);
   const [displayPositionMs, setDisplayPositionMs] = useState(0);
   const blackoutTimerRef = useRef<number | null>(null);
@@ -76,14 +75,15 @@ function LockScreen({ isMainLockWindow }: LockScreenProps) {
 
   const restartBlackoutTimer = (seconds: number, locked: boolean) => {
     clearBlackoutTimer();
-    setIsBlackout(false);
 
     if (!locked || seconds <= 0) {
       return;
     }
 
     blackoutTimerRef.current = window.setTimeout(() => {
-      setIsBlackout(true);
+      void invoke("turn_off_display").catch((error) => {
+        console.error("Failed to turn off display:", error);
+      });
     }, seconds * 1000);
   };
 
@@ -203,20 +203,13 @@ function LockScreen({ isMainLockWindow }: LockScreenProps) {
     };
   }, []);
 
-  const wakeBlackout = () => {
+  const refreshDisplayOffTimer = () => {
     if (blackoutSecondsRef.current > 0) {
       restartBlackoutTimer(blackoutSecondsRef.current, isLockedRef.current);
-    } else {
-      setIsBlackout(false);
     }
   };
 
   const handleUnlock = async () => {
-    if (isBlackout) {
-      wakeBlackout();
-      return;
-    }
-
     try {
       await invoke("verify_hello");
     } catch (error) {
@@ -226,11 +219,11 @@ function LockScreen({ isMainLockWindow }: LockScreenProps) {
 
   return (
     <div
-      className={`lock-container${isBlackout ? " is-blackout" : ""}`}
+      className="lock-container"
       onDoubleClick={handleUnlock}
-      onMouseMove={wakeBlackout}
-      onMouseDown={wakeBlackout}
-      onTouchStart={wakeBlackout}
+      onMouseMove={refreshDisplayOffTimer}
+      onMouseDown={refreshDisplayOffTimer}
+      onTouchStart={refreshDisplayOffTimer}
     >
       <video className="video-bg" autoPlay loop muted playsInline>
         <source src="/bg.mp4" type="video/mp4" />
@@ -242,7 +235,7 @@ function LockScreen({ isMainLockWindow }: LockScreenProps) {
         </div>
       ) : null}
 
-      <div className={`overlay${isBlackout ? " is-hidden" : ""}`}>
+      <div className="overlay">
         <div className="time">
           {time.toLocaleTimeString("en-US", {
             hour12: false,
@@ -355,7 +348,6 @@ function LockScreen({ isMainLockWindow }: LockScreenProps) {
         </div>
       </div>
 
-      {isBlackout ? <div className="blackout-layer" /> : null}
     </div>
   );
 }

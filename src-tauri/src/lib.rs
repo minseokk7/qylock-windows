@@ -1,13 +1,13 @@
 use base64::Engine;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde::{Deserialize, Serialize};
+use semver::Version;
 use std::{
     env, fs,
     io::ErrorKind,
     mem::size_of,
     path::PathBuf,
-    process::Command,
-    sync::{Condvar, LazyLock, Mutex, OnceLock},
+    sync::{Arc, Condvar, LazyLock, Mutex, OnceLock},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -15,7 +15,10 @@ use tauri::{
     menu::MenuBuilder, tray::TrayIconBuilder, window::Monitor, AppHandle, Emitter, Manager,
     WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
-use windows::core::{factory, w, BOOL};
+use windows::{
+    core::{factory, w},
+    Foundation::TypedEventHandler,
+};
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession,
     GlobalSystemMediaTransportControlsSessionManager,
@@ -25,30 +28,26 @@ use windows::Storage::Streams::DataReader;
 use windows::Security::Credentials::UI::{
     UserConsentVerificationResult, UserConsentVerifier, UserConsentVerifierAvailability,
 };
-use windows::Win32::Foundation::{CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
 use windows::Win32::System::WinRT::IUserConsentVerifierInterop;
 use windows::Win32::System::SystemInformation::GetTickCount;
-use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
-    PROCESS_QUERY_LIMITED_INFORMATION,
-};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetLastInputInfo, LASTINPUTINFO, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE,
     VK_F4, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    EnumWindows, FindWindowExW, FindWindowW, GetMessageW, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindowVisible, PostQuitMessage, RegisterClassW, SetWindowsHookExW,
-    ShowWindow, TranslateMessage, UnhookWindowsHookEx, UnregisterClassW, HHOOK, HWND_MESSAGE,
+    FindWindowExW, FindWindowW, GetMessageW, IsWindowVisible, PostQuitMessage, RegisterClassW,
+    SendMessageTimeoutW, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
+    UnregisterClassW, HHOOK, HWND_BROADCAST, HWND_MESSAGE,
     KBDLLHOOKSTRUCT, KBDLLHOOKSTRUCT_FLAGS, LLKHF_ALTDOWN, MSG, PBT_APMRESUMEAUTOMATIC,
-    PBT_APMRESUMESUSPEND, SW_HIDE, SW_SHOW, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_DESTROY, WM_KEYDOWN, WM_POWERBROADCAST, WM_SYSKEYDOWN, WM_WTSSESSION_CHANGE, WNDCLASSW,
-    WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
+    PBT_APMRESUMESUSPEND, SC_MONITORPOWER, SMTO_ABORTIFHUNG, SW_HIDE, SW_SHOW, WH_KEYBOARD_LL,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_KEYDOWN, WM_POWERBROADCAST, WM_SYSCOMMAND,
+    WM_SYSKEYDOWN, WM_WTSSESSION_CHANGE, WNDCLASSW, WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
 };
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 
@@ -72,6 +71,8 @@ static APP_SETTINGS: LazyLock<Mutex<AppSettings>> =
     LazyLock::new(|| Mutex::new(AppSettings::default()));
 static AUTO_LOCK_WATCHER_SIGNAL: LazyLock<(Mutex<u64>, Condvar)> =
     LazyLock::new(|| (Mutex::new(0), Condvar::new()));
+static MEDIA_BRIDGE_SIGNAL: LazyLock<(Mutex<u64>, Condvar)> =
+    LazyLock::new(|| (Mutex::new(0), Condvar::new()));
 static MEDIA_BRIDGE_STATE: LazyLock<Mutex<MediaBridgeState>> =
     LazyLock::new(|| Mutex::new(MediaBridgeState::default()));
 
@@ -79,18 +80,23 @@ const MAIN_WINDOW_LABEL: &str = "main";
 const SETTINGS_WINDOW_LABEL: &str = "settings";
 const AUX_WINDOW_PREFIX: &str = "lock-screen-monitor-";
 const LOCK_SHORTCUT_LABEL: &str = "Ctrl+Alt+L";
+const DISPLAY_OFF_SHORTCUT_LABEL: &str = "Ctrl+Alt+O";
+const GITHUB_RELEASES_LATEST_URL: &str =
+    "https://api.github.com/repos/minseokk7/qylock-windows/releases/latest";
+const GITHUB_RELEASES_PAGE_URL: &str = "https://github.com/minseokk7/qylock-windows/releases/latest";
 const TRAY_SETTINGS_ID: &str = "tray-open-settings";
 const TRAY_LOCK_ID: &str = "tray-lock-now";
 const TRAY_QUIT_ID: &str = "tray-quit";
 const STARTUP_REGISTRY_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const STARTUP_VALUE_NAME: &str = "qylock";
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct AppSettings {
     auto_lock_timeout_seconds: u64,
     blackout_timeout_seconds: u64,
     launch_on_startup: bool,
+    #[serde(default = "default_media_bridge_enabled")]
+    media_bridge_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -110,6 +116,27 @@ struct NowPlayingInfo {
 #[derive(Debug, Default)]
 struct MediaBridgeState {
     now_playing: Option<NowPlayingInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCheckResult {
+    current_version: String,
+    latest_version: String,
+    update_available: bool,
+    release_url: String,
+    published_at: Option<String>,
+    release_name: Option<String>,
+    summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubLatestRelease {
+    tag_name: String,
+    html_url: String,
+    published_at: Option<String>,
+    name: Option<String>,
+    body: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,8 +160,41 @@ impl Default for AppSettings {
             auto_lock_timeout_seconds: 0,
             blackout_timeout_seconds: 0,
             launch_on_startup: false,
+            media_bridge_enabled: default_media_bridge_enabled(),
         }
     }
+}
+
+fn default_media_bridge_enabled() -> bool {
+    true
+}
+
+fn app_version_string() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+fn normalize_version_tag(raw: &str) -> String {
+    raw.trim().trim_start_matches(['v', 'V']).to_string()
+}
+
+fn parse_release_version(raw: &str) -> Result<Version, String> {
+    let normalized = normalize_version_tag(raw);
+    Version::parse(&normalized).map_err(|error| format!("failed to parse version `{raw}`: {error}"))
+}
+
+fn summarize_release_notes(body: Option<&str>) -> Option<String> {
+    let first_line = body?
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+
+    let mut summary = first_line.to_string();
+    if summary.chars().count() > 120 {
+        summary = summary.chars().take(117).collect::<String>();
+        summary.push_str("...");
+    }
+
+    Some(summary)
 }
 
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -154,6 +214,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             vk == VK_LWIN || vk == VK_RWIN || is_left_windows_down || is_right_windows_down;
         let is_q = vk == VIRTUAL_KEY(0x51);
         let is_l = vk == VIRTUAL_KEY(0x4C);
+        let is_o = vk == VIRTUAL_KEY(0x4F);
 
         let is_locked = {
             let state = LOCK_STATE.lock().unwrap();
@@ -172,6 +233,34 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                     }
                 }) {
                     eprintln!("failed to schedule keyboard-hook lock on main thread: {error}");
+                }
+            }
+            return LRESULT(1);
+        }
+
+        if is_key_down && is_o && is_ctrl && (is_alt || is_menu) && !is_shift {
+            if cfg!(debug_assertions) {
+                eprintln!("keyboard hook detected {DISPLAY_OFF_SHORTCUT_LABEL}");
+            }
+            if let Some(app) = APP_HANDLE.get().cloned() {
+                let app_handle = app.clone();
+                if let Err(error) = app.run_on_main_thread(move || {
+                    if !is_locked {
+                        if let Err(error) = lock_screen_impl(&app_handle) {
+                            eprintln!(
+                                "failed to lock before display-off from keyboard hook: {error}"
+                            );
+                            return;
+                        }
+                    }
+
+                    if let Err(error) = turn_off_display() {
+                        eprintln!("failed to turn off display from keyboard hook: {error}");
+                    }
+                }) {
+                    eprintln!(
+                        "failed to schedule keyboard-hook display-off on main thread: {error}"
+                    );
                 }
             }
             return LRESULT(1);
@@ -334,6 +423,25 @@ fn update_media_bridge_state(next_now_playing: Option<NowPlayingInfo>) -> bool {
     true
 }
 
+fn emit_media_bridge_update(
+    app: &AppHandle,
+    next_now_playing: Option<NowPlayingInfo>,
+) -> Result<(), String> {
+    app.emit("media-now-playing-updated", next_now_playing)
+        .map_err(|error| format!("failed to emit media bridge update: {error}"))
+}
+
+fn sync_media_bridge_state(
+    app: &AppHandle,
+    next_now_playing: Option<NowPlayingInfo>,
+) -> Result<(), String> {
+    if update_media_bridge_state(next_now_playing.clone()) {
+        emit_media_bridge_update(app, next_now_playing)?;
+    }
+
+    Ok(())
+}
+
 fn playback_status_label(
     status: GlobalSystemMediaTransportControlsSessionPlaybackStatus,
 ) -> &'static str {
@@ -422,14 +530,32 @@ fn read_media_thumbnail_data_url(
     )))
 }
 
+fn request_media_session_manager() -> Result<GlobalSystemMediaTransportControlsSessionManager, String> {
+    GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+        .map_err(|error| format!("failed to request media session manager: {error}"))?
+        .join()
+        .map_err(|error| format!("failed to await media session manager: {error}"))
+}
+
+fn read_media_session_app_id(
+    session: &GlobalSystemMediaTransportControlsSession,
+) -> Result<String, String> {
+    session
+        .SourceAppUserModelId()
+        .map_err(|error| format!("failed to read media session app id: {error}"))
+        .map(|app_id| app_id.to_string())
+}
+
+fn is_tidal_media_session(session: &GlobalSystemMediaTransportControlsSession) -> Result<bool, String> {
+    Ok(read_media_session_app_id(session)?
+        .to_ascii_lowercase()
+        .contains("tidal"))
+}
+
 fn read_tidal_session_now_playing(
     session: &GlobalSystemMediaTransportControlsSession,
 ) -> Result<Option<NowPlayingInfo>, String> {
-    let app_id = session
-        .SourceAppUserModelId()
-        .map_err(|error| format!("failed to read media session app id: {error}"))?
-        .to_string();
-    if !app_id.to_ascii_lowercase().contains("tidal") {
+    if !is_tidal_media_session(session)? {
         return Ok(None);
     }
 
@@ -490,11 +616,9 @@ fn read_tidal_session_now_playing(
     ))
 }
 
-fn collect_tidal_session_now_playing() -> Result<SessionProbe, String> {
-    let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
-        .map_err(|error| format!("failed to request media session manager: {error}"))?
-        .join()
-        .map_err(|error| format!("failed to await media session manager: {error}"))?;
+fn collect_tidal_session_now_playing_from_manager(
+    manager: &GlobalSystemMediaTransportControlsSessionManager,
+) -> Result<SessionProbe, String> {
     let sessions = manager
         .GetSessions()
         .map_err(|error| format!("failed to enumerate media sessions: {error}"))?;
@@ -507,11 +631,7 @@ fn collect_tidal_session_now_playing() -> Result<SessionProbe, String> {
         let session = sessions
             .GetAt(index)
             .map_err(|error| format!("failed to read media session at index {index}: {error}"))?;
-        let app_id = session
-            .SourceAppUserModelId()
-            .map_err(|error| format!("failed to read media session app id: {error}"))?
-            .to_string();
-        if !app_id.to_ascii_lowercase().contains("tidal") {
+        if !is_tidal_media_session(&session)? {
             continue;
         }
 
@@ -529,10 +649,7 @@ fn collect_tidal_session_now_playing() -> Result<SessionProbe, String> {
 }
 
 fn find_tidal_media_session() -> Result<Option<GlobalSystemMediaTransportControlsSession>, String> {
-    let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
-        .map_err(|error| format!("failed to request media session manager: {error}"))?
-        .join()
-        .map_err(|error| format!("failed to await media session manager: {error}"))?;
+    let manager = request_media_session_manager()?;
     let sessions = manager
         .GetSessions()
         .map_err(|error| format!("failed to enumerate media sessions: {error}"))?;
@@ -544,240 +661,12 @@ fn find_tidal_media_session() -> Result<Option<GlobalSystemMediaTransportControl
         let session = sessions
             .GetAt(index)
             .map_err(|error| format!("failed to read media session at index {index}: {error}"))?;
-        let app_id = session
-            .SourceAppUserModelId()
-            .map_err(|error| format!("failed to read media session app id: {error}"))?
-            .to_string();
-        if app_id.to_ascii_lowercase().contains("tidal") {
+        if is_tidal_media_session(&session)? {
             return Ok(Some(session));
         }
     }
 
     Ok(None)
-}
-
-fn parse_tidal_window_title(window_title: &str, source_kind: &str) -> Option<NowPlayingInfo> {
-    let trimmed = window_title.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let without_suffix = trimmed
-        .strip_suffix(" - TIDAL")
-        .or_else(|| trimmed.strip_suffix(" - Tidal"))
-        .or_else(|| trimmed.strip_suffix(" - tidal"))
-        .unwrap_or(trimmed)
-        .trim();
-    if without_suffix.is_empty() || without_suffix.eq_ignore_ascii_case("tidal") {
-        return None;
-    }
-
-    let parts: Vec<&str> = without_suffix
-        .split(" - ")
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect();
-
-    let (title, artist) = if parts.len() >= 2 {
-        (parts[0].to_string(), parts[1..].join(" - "))
-    } else {
-        (without_suffix.to_string(), String::new())
-    };
-
-    build_now_playing(
-        source_kind,
-        title,
-        artist,
-        String::new(),
-        None,
-        "playing",
-        0,
-        0,
-    )
-}
-
-fn read_window_title(hwnd: HWND, visible_only: bool) -> Option<String> {
-    if visible_only && unsafe { !IsWindowVisible(hwnd).as_bool() } {
-        return None;
-    }
-
-    let title_length = unsafe { GetWindowTextLengthW(hwnd) };
-    if title_length <= 0 {
-        return None;
-    }
-
-    let mut buffer = vec![0u16; title_length as usize + 1];
-    let read_length = unsafe { GetWindowTextW(hwnd, &mut buffer) };
-    if read_length <= 0 {
-        return None;
-    }
-
-    let title = String::from_utf16_lossy(&buffer[..read_length as usize]);
-    if title.trim().is_empty() {
-        None
-    } else {
-        Some(title)
-    }
-}
-
-fn read_window_process_name(hwnd: HWND) -> Option<String> {
-    let mut process_id = 0u32;
-    unsafe {
-        GetWindowThreadProcessId(hwnd, Some(&mut process_id));
-    }
-    if process_id == 0 {
-        return None;
-    }
-
-    let process_handle =
-        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }.ok()?;
-    let mut buffer = vec![0u16; 260];
-    let mut size = buffer.len() as u32;
-    let query_result = unsafe {
-        QueryFullProcessImageNameW(
-            process_handle,
-            PROCESS_NAME_FORMAT(0),
-            windows::core::PWSTR(buffer.as_mut_ptr()),
-            &mut size,
-        )
-    };
-    let _ = unsafe { CloseHandle(process_handle) };
-    query_result.ok()?;
-
-    let path = String::from_utf16_lossy(&buffer[..size as usize]);
-    PathBuf::from(path)
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-}
-
-struct WindowTitleCollectContext {
-    titles: Vec<String>,
-    visible_only: bool,
-    allow_title_match: bool,
-}
-
-unsafe extern "system" fn collect_tidal_window_titles_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let context = unsafe { &mut *(lparam.0 as *mut WindowTitleCollectContext) };
-    let Some(window_title) = read_window_title(hwnd, context.visible_only) else {
-        return BOOL(1);
-    };
-
-    let process_name = read_window_process_name(hwnd).unwrap_or_default();
-    let matches_tidal_process = process_name.eq_ignore_ascii_case("TIDAL");
-    let matches_tidal_title =
-        context.allow_title_match && window_title.to_ascii_lowercase().contains("tidal");
-
-    if matches_tidal_process || matches_tidal_title {
-        context.titles.push(window_title);
-    }
-
-    BOOL(1)
-}
-
-fn collect_tidal_window_titles(
-    visible_only: bool,
-    allow_title_match: bool,
-) -> Result<Vec<String>, String> {
-    let mut context = WindowTitleCollectContext {
-        titles: Vec::new(),
-        visible_only,
-        allow_title_match,
-    };
-
-    unsafe {
-        EnumWindows(
-            Some(collect_tidal_window_titles_callback),
-            LPARAM((&mut context as *mut WindowTitleCollectContext) as isize),
-        )
-        .map_err(|error| format!("failed to enumerate window titles: {error}"))?;
-    }
-
-    Ok(context.titles)
-}
-
-fn read_tidal_desktop_window_now_playing() -> Result<Option<NowPlayingInfo>, String> {
-    let titles = collect_tidal_window_titles(false, false)?;
-    for window_title in titles {
-        if let Some(now_playing) = parse_tidal_window_title(&window_title, "tidal-desktop") {
-            return Ok(Some(now_playing));
-        }
-    }
-
-    Ok(None)
-}
-
-fn read_tidal_visible_window_now_playing() -> Result<Option<NowPlayingInfo>, String> {
-    let titles = collect_tidal_window_titles(true, true)?;
-    for window_title in titles {
-        if let Some(now_playing) = parse_tidal_window_title(&window_title, "tidal-window") {
-            return Ok(Some(now_playing));
-        }
-    }
-
-    Ok(None)
-}
-
-fn read_tidal_powershell_now_playing() -> Result<Option<NowPlayingInfo>, String> {
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; (Get-Process -Name TIDAL -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle } | Select-Object -ExpandProperty MainWindowTitle -First 1)",
-        ])
-        .output()
-        .map_err(|error| format!("failed to query TIDAL process title: {error}"))?;
-
-    if !output.status.success() {
-        return Ok(None);
-    }
-
-    let title = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if title.is_empty() {
-        return Ok(None);
-    }
-
-    Ok(parse_tidal_window_title(&title, "tidal-powershell"))
-}
-
-fn collect_tidal_now_playing() -> Result<Option<NowPlayingInfo>, String> {
-    let session_probe = match collect_tidal_session_now_playing() {
-        Ok(session_probe) => session_probe,
-        Err(error) => {
-            eprintln!("failed to probe TIDAL media session: {error}");
-            SessionProbe::NotFound
-        }
-    };
-
-    match session_probe {
-        SessionProbe::Playing(now_playing) => return Ok(Some(now_playing)),
-        SessionProbe::Inactive => {}
-        SessionProbe::NotFound => {}
-    }
-
-    match read_tidal_powershell_now_playing() {
-        Ok(Some(now_playing)) => return Ok(Some(now_playing)),
-        Ok(None) => {}
-        Err(error) => {
-            eprintln!("failed to read TIDAL process main window title: {error}");
-        }
-    }
-
-    match read_tidal_visible_window_now_playing() {
-        Ok(Some(now_playing)) => return Ok(Some(now_playing)),
-        Ok(None) => {}
-        Err(error) => {
-            eprintln!("failed to read visible TIDAL window title: {error}");
-        }
-    }
-
-    match read_tidal_desktop_window_now_playing() {
-        Ok(Some(now_playing)) => Ok(Some(now_playing)),
-        Ok(None) => Ok(None),
-        Err(error) => {
-            eprintln!("failed to enumerate TIDAL desktop windows: {error}");
-            Ok(None)
-        }
-    }
 }
 
 fn current_settings() -> AppSettings {
@@ -801,6 +690,140 @@ fn wait_for_auto_lock_signal(timeout: Duration) {
     let (signal_mutex, signal) = &*AUTO_LOCK_WATCHER_SIGNAL;
     let generation = signal_mutex.lock().unwrap();
     let _ = signal.wait_timeout(generation, timeout).unwrap();
+}
+
+fn notify_media_bridge() {
+    let (signal_mutex, signal) = &*MEDIA_BRIDGE_SIGNAL;
+    let mut generation = signal_mutex.lock().unwrap();
+    *generation = generation.wrapping_add(1);
+    signal.notify_all();
+}
+
+fn wait_for_media_bridge_signal(timeout: Duration) {
+    let (signal_mutex, signal) = &*MEDIA_BRIDGE_SIGNAL;
+    let generation = signal_mutex.lock().unwrap();
+    let _ = signal.wait_timeout(generation, timeout).unwrap();
+}
+
+struct MediaSessionSubscription {
+    session: GlobalSystemMediaTransportControlsSession,
+    playback_info_token: i64,
+    media_properties_token: i64,
+}
+
+impl Drop for MediaSessionSubscription {
+    fn drop(&mut self) {
+        let _ = self
+            .session
+            .RemovePlaybackInfoChanged(self.playback_info_token);
+        let _ = self
+            .session
+            .RemoveMediaPropertiesChanged(self.media_properties_token);
+    }
+}
+
+struct MediaManagerSubscription {
+    manager: GlobalSystemMediaTransportControlsSessionManager,
+    current_session_changed_token: i64,
+    sessions_changed_token: i64,
+}
+
+impl Drop for MediaManagerSubscription {
+    fn drop(&mut self) {
+        let _ = self
+            .manager
+            .RemoveCurrentSessionChanged(self.current_session_changed_token);
+        let _ = self.manager.RemoveSessionsChanged(self.sessions_changed_token);
+    }
+}
+
+fn subscribe_to_media_session(
+    session: &GlobalSystemMediaTransportControlsSession,
+) -> Result<MediaSessionSubscription, String> {
+    let playback_info_token = session
+        .PlaybackInfoChanged(&TypedEventHandler::new(move |_, _| {
+            notify_media_bridge();
+            Ok(())
+        }))
+        .map_err(|error| format!("failed to register playback info handler: {error}"))?;
+    let media_properties_token = session
+        .MediaPropertiesChanged(&TypedEventHandler::new(move |_, _| {
+            notify_media_bridge();
+            Ok(())
+        }))
+        .map_err(|error| format!("failed to register media properties handler: {error}"))?;
+
+    Ok(MediaSessionSubscription {
+        session: session.clone(),
+        playback_info_token,
+        media_properties_token,
+    })
+}
+
+fn refresh_media_session_subscriptions(
+    manager: &GlobalSystemMediaTransportControlsSessionManager,
+    session_subscriptions: &Arc<Mutex<Vec<MediaSessionSubscription>>>,
+) -> Result<(), String> {
+    let sessions = manager
+        .GetSessions()
+        .map_err(|error| format!("failed to enumerate media sessions for subscriptions: {error}"))?;
+    let session_count = sessions
+        .Size()
+        .map_err(|error| format!("failed to read media session subscription count: {error}"))?;
+    let mut next_subscriptions = Vec::new();
+
+    for index in 0..session_count {
+        let session = sessions.GetAt(index).map_err(|error| {
+            format!("failed to read media session for subscriptions at index {index}: {error}")
+        })?;
+        if !is_tidal_media_session(&session)? {
+            continue;
+        }
+
+        next_subscriptions.push(subscribe_to_media_session(&session)?);
+    }
+
+    *session_subscriptions.lock().unwrap() = next_subscriptions;
+    Ok(())
+}
+
+fn subscribe_to_media_manager(
+    manager: &GlobalSystemMediaTransportControlsSessionManager,
+) -> Result<MediaManagerSubscription, String> {
+    let current_session_changed_token = manager
+        .CurrentSessionChanged(&TypedEventHandler::new(move |_, _| {
+            notify_media_bridge();
+            Ok(())
+        }))
+        .map_err(|error| format!("failed to register current session handler: {error}"))?;
+    let sessions_changed_token = manager
+        .SessionsChanged(&TypedEventHandler::new(move |_, _| {
+            notify_media_bridge();
+            Ok(())
+        }))
+        .map_err(|error| format!("failed to register sessions changed handler: {error}"))?;
+
+    Ok(MediaManagerSubscription {
+        manager: manager.clone(),
+        current_session_changed_token,
+        sessions_changed_token,
+    })
+}
+
+fn refresh_media_bridge_snapshot(
+    app: &AppHandle,
+    manager: &GlobalSystemMediaTransportControlsSessionManager,
+) -> Result<(), String> {
+    if !current_settings().media_bridge_enabled {
+        return sync_media_bridge_state(app, None);
+    }
+
+    let next_now_playing = match collect_tidal_session_now_playing_from_manager(manager)? {
+        SessionProbe::Playing(now_playing) => Some(now_playing),
+        SessionProbe::Inactive | SessionProbe::NotFound => None,
+    };
+
+    sync_media_bridge_state(app, next_now_playing)
 }
 
 fn current_system_idle_state() -> Result<(u64, u32), String> {
@@ -840,6 +863,7 @@ fn restore_lock_window_after_system_resume(reason: &str) {
 fn handle_system_resume() {
     reset_auto_lock_baseline();
     notify_auto_lock_watcher();
+    notify_media_bridge();
     restore_lock_window_after_system_resume("power resume");
 }
 
@@ -1003,21 +1027,49 @@ fn start_auto_lock_watcher(app: AppHandle) {
 
 fn start_media_bridge(app: AppHandle) {
     thread::spawn(move || loop {
-        let next_now_playing = match collect_tidal_now_playing() {
-            Ok(now_playing) => now_playing,
+        let manager = match request_media_session_manager() {
+            Ok(manager) => manager,
             Err(error) => {
-                eprintln!("failed to collect TIDAL now playing state: {error}");
-                None
+                eprintln!("failed to start media bridge manager: {error}");
+                wait_for_media_bridge_signal(Duration::from_secs(15));
+                continue;
+            }
+        };
+        let session_subscriptions = Arc::new(Mutex::new(Vec::new()));
+
+        if let Err(error) = refresh_media_session_subscriptions(&manager, &session_subscriptions) {
+            eprintln!("failed to subscribe to TIDAL media sessions: {error}");
+            wait_for_media_bridge_signal(Duration::from_secs(15));
+            continue;
+        }
+
+        let _manager_subscription = match subscribe_to_media_manager(&manager) {
+            Ok(subscription) => subscription,
+            Err(error) => {
+                eprintln!("failed to subscribe to media manager events: {error}");
+                wait_for_media_bridge_signal(Duration::from_secs(15));
+                continue;
             }
         };
 
-        if update_media_bridge_state(next_now_playing.clone()) {
-            if let Err(error) = app.emit("media-now-playing-updated", next_now_playing) {
-                eprintln!("failed to emit media bridge update: {error}");
-            }
+        if let Err(error) = refresh_media_bridge_snapshot(&app, &manager) {
+            eprintln!("failed to initialize media bridge state: {error}");
         }
 
-        thread::sleep(Duration::from_secs(2));
+        loop {
+            wait_for_media_bridge_signal(Duration::from_secs(60));
+
+            if let Err(error) = refresh_media_session_subscriptions(&manager, &session_subscriptions)
+            {
+                eprintln!("failed to refresh media session subscriptions: {error}");
+                break;
+            }
+
+            if let Err(error) = refresh_media_bridge_snapshot(&app, &manager) {
+                eprintln!("failed to refresh media bridge state: {error}");
+                break;
+            }
+        }
     });
 }
 
@@ -1035,8 +1087,8 @@ fn open_settings_window(app: &AppHandle) -> Result<(), String> {
         WebviewUrl::App("index.html".into()),
     )
     .title("qylock 설정")
-    .inner_size(520.0, 860.0)
-    .min_inner_size(500.0, 840.0)
+    .inner_size(760.0, 650.0)
+    .min_inner_size(720.0, 650.0)
     .decorations(false)
     .resizable(false)
     .center()
@@ -1531,6 +1583,100 @@ fn hide_settings_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn send_monitor_power_signal(target: HWND) -> bool {
+    unsafe {
+        SendMessageTimeoutW(
+            target,
+            WM_SYSCOMMAND,
+            WPARAM(SC_MONITORPOWER as usize),
+            LPARAM(2),
+            SMTO_ABORTIFHUNG,
+            300,
+            None,
+        )
+        .0 != 0
+    }
+}
+
+#[tauri::command]
+fn turn_off_display() -> Result<bool, String> {
+    let mut signaled = false;
+
+    unsafe {
+        if let Ok(progman) = FindWindowW(w!("Progman"), None) {
+            if !progman.is_invalid() {
+                signaled |= send_monitor_power_signal(progman);
+            }
+        }
+
+        if let Ok(taskbar) = FindWindowW(w!("Shell_TrayWnd"), None) {
+            if !taskbar.is_invalid() {
+                signaled |= send_monitor_power_signal(taskbar);
+            }
+        }
+    }
+
+    signaled |= send_monitor_power_signal(HWND_BROADCAST);
+
+    Ok(signaled)
+}
+
+#[tauri::command]
+fn get_app_version() -> String {
+    app_version_string()
+}
+
+#[tauri::command]
+async fn check_for_updates() -> Result<UpdateCheckResult, String> {
+    let current_version_raw = app_version_string();
+    let current_version = parse_release_version(&current_version_raw)?;
+
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(|error| format!("failed to create update client: {error}"))?;
+
+    let response = client
+        .get(GITHUB_RELEASES_LATEST_URL)
+        .header(
+            reqwest::header::USER_AGENT,
+            format!("qylock-windows/{current_version_raw}"),
+        )
+        .header(
+            reqwest::header::ACCEPT,
+            "application/vnd.github+json",
+        )
+        .send()
+        .await
+        .map_err(|error| format!("failed to check latest release: {error}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("update check failed with status {status}"));
+    }
+
+    let latest_release = response
+        .json::<GitHubLatestRelease>()
+        .await
+        .map_err(|error| format!("failed to parse latest release response: {error}"))?;
+
+    let latest_version_raw = normalize_version_tag(&latest_release.tag_name);
+    let latest_version = parse_release_version(&latest_release.tag_name)?;
+
+    Ok(UpdateCheckResult {
+        current_version: current_version_raw,
+        latest_version: latest_version_raw,
+        update_available: latest_version > current_version,
+        release_url: if latest_release.html_url.is_empty() {
+            GITHUB_RELEASES_PAGE_URL.to_string()
+        } else {
+            latest_release.html_url
+        },
+        published_at: latest_release.published_at,
+        release_name: latest_release.name,
+        summary: summarize_release_notes(latest_release.body.as_deref()),
+    })
+}
+
 #[tauri::command]
 fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
     let previous_settings = current_settings();
@@ -1549,6 +1695,7 @@ fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
             .map(|(_, last_input_tick)| last_input_tick);
     }
     notify_auto_lock_watcher();
+    notify_media_bridge();
     app.emit("settings-updated", settings)
         .map_err(|error| format!("failed to emit settings update event: {error}"))?;
     Ok(())
@@ -1583,6 +1730,9 @@ pub fn run() {
             get_now_playing_snapshot,
             control_now_playing,
             hide_settings_window,
+            turn_off_display,
+            get_app_version,
+            check_for_updates,
             get_settings,
             save_settings
         ])
