@@ -1,0 +1,377 @@
+@font-face {
+  font-family: "Pixelify Sans";
+  src: url("../src/assets/fonts/PixelifySans-Bold.ttf") format("truetype");
+  font-weight: 700;
+}
+
+@font-face {
+  font-family: "Mulmaru Mono";
+  src: url("../src/assets/fonts/MulmaruMono.woff2") format("woff2");
+  font-weight: 400;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: #0b0f16;
+  font-family: "Mulmaru Mono", sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+button {
+  font: inherit;
+}
+
+.installer-shell {
+  height: 100vh;
+  padding: 14px;
+  box-sizing: border-box;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 80% 8%, rgba(255, 145, 41, 0.24), transparent 24%),
+    radial-gradient(circle at 15% 85%, rgba(255, 184, 77, 0.12), transparent 26%),
+    linear-gradient(155deg, #0d131d 0%, #131924 48%, #1a1e28 100%);
+}
+
+.installer-frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 28px);
+  padding: 16px 22px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 28px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 22%),
+    rgba(9, 13, 20, 0.9);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+  box-sizing: border-box;
+}
+
+.installer-topbar {
+  position: absolute;
+  top: 16px;
+  left: 22px;
+  right: 22px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  min-height: 44px;
+  align-items: flex-start;
+  z-index: 2;
+}
+
+.installer-drag-region {
+  flex: 1;
+  height: 100%;
+  cursor: grab;
+}
+
+.installer-drag-region:active {
+  cursor: grabbing;
+}
+
+.installer-window-button {
+  width: 42px;
+  height: 42px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff6dc;
+  cursor: pointer;
+}
+
+.installer-window-button.is-close:hover {
+  background: rgba(255, 122, 24, 0.18);
+}
+
+.installer-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.9fr);
+  gap: 18px;
+  align-items: end;
+  margin-top: 0;
+}
+
+.installer-kicker {
+  margin: 0 0 0.9rem;
+  color: #ffb84d;
+  letter-spacing: 0.18rem;
+  font-size: 0.85rem;
+  font-family: "Pixelify Sans", sans-serif;
+}
+
+.installer-brand-block h1 {
+  margin: 0;
+  max-width: 8.5em;
+  font-family: "Mulmaru Mono", sans-serif;
+  font-size: clamp(2.9rem, 4.2vw, 4.3rem);
+  line-height: 1.15;
+  letter-spacing: -0.04em;
+  word-break: keep-all;
+  color: #fff6dc;
+}
+
+.installer-copy {
+  max-width: 33rem;
+  margin: 1rem 0 0;
+  color: rgba(245, 239, 228, 0.72);
+  line-height: 1.55;
+  font-family: "Segoe UI", sans-serif;
+  font-size: 1rem;
+}
+
+.installer-version-row {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 1.4rem;
+  color: rgba(255, 246, 220, 0.72);
+  font-size: 0.82rem;
+  font-family: "Pixelify Sans", "Mulmaru Mono", sans-serif;
+}
+
+.installer-stage {
+  position: relative;
+  min-height: 198px;
+  border-radius: 24px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at top right, rgba(255, 184, 77, 0.24), transparent 26%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+}
+
+.installer-stage-orb {
+  position: absolute;
+  inset: 20px 24px auto auto;
+  width: 120px;
+  height: 120px;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 32% 32%, rgba(255, 246, 220, 0.82), rgba(255, 184, 77, 0.7) 36%, rgba(255, 122, 24, 0.3) 70%, transparent 72%);
+  filter: blur(6px);
+}
+
+.installer-stage-panel {
+  position: absolute;
+  inset: auto 20px 20px 20px;
+  padding: 18px;
+  border-radius: 18px;
+  background: rgba(8, 12, 18, 0.74);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.installer-stage-label,
+.installer-block-label {
+  margin: 0 0 0.55rem;
+  color: rgba(255, 184, 77, 0.94);
+  font-size: 0.82rem;
+  letter-spacing: 0.08rem;
+}
+
+.installer-stage-panel strong {
+  color: #fff6dc;
+  font-size: 1rem;
+  font-family: "Mulmaru Mono", sans-serif;
+}
+
+.installer-stage-help,
+.installer-body-copy,
+.installer-progress-message {
+  margin: 0.7rem 0 0;
+  color: rgba(244, 238, 228, 0.72);
+  font-family: "Segoe UI", sans-serif;
+  line-height: 1.5;
+}
+
+.installer-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.installer-column {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.installer-block,
+.installer-progress-block {
+  padding: 16px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.installer-feature-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 10px;
+  color: #fff6dc;
+  font-size: 0.95rem;
+}
+
+.installer-feature-list li::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 10px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #ffb84d, #ff7a18);
+  vertical-align: middle;
+}
+
+.installer-progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #fff6dc;
+}
+
+.installer-progress-track {
+  height: 10px;
+  margin-top: 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+}
+
+.installer-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  transition: width 0.5s ease;
+  background: linear-gradient(90deg, #ffb84d, #ff7a18);
+}
+
+.installer-progress-fill.is-error {
+  background: linear-gradient(90deg, #ff8e6b, #ff4d4f);
+}
+
+.installer-step-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.installer-step {
+  padding: 11px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 246, 220, 0.58);
+  font-size: 0.88rem;
+}
+
+.installer-step.is-done {
+  color: #fff6dc;
+  background: linear-gradient(135deg, rgba(255, 184, 77, 0.14), rgba(255, 122, 24, 0.18));
+}
+
+.installer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.installer-button {
+  min-width: 148px;
+  padding: 13px 20px;
+  border: 0;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.09);
+  color: #fff6dc;
+  cursor: pointer;
+  font-family: "Mulmaru Mono", sans-serif;
+}
+
+.installer-button.is-primary {
+  background: linear-gradient(135deg, #ffb84d 0%, #ff7a18 100%);
+  color: #201200;
+}
+
+.installer-button:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+.installer-consent-backdrop {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(4, 8, 14, 0.72);
+  backdrop-filter: blur(10px);
+  z-index: 5;
+}
+
+.installer-consent-modal {
+  width: min(100%, 460px);
+  padding: 22px;
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(circle at top right, rgba(255, 184, 77, 0.14), transparent 28%),
+    rgba(12, 17, 25, 0.96);
+  box-shadow: 0 24px 72px rgba(0, 0, 0, 0.4);
+  box-sizing: border-box;
+}
+
+.installer-consent-modal h2 {
+  margin: 0;
+  color: #fff6dc;
+  font-size: 1.6rem;
+  line-height: 1.15;
+  font-family: "Mulmaru Mono", sans-serif;
+}
+
+.installer-consent-list {
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 9px;
+  color: rgba(255, 246, 220, 0.82);
+  font-family: "Segoe UI", sans-serif;
+}
+
+.installer-consent-list li {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.installer-consent-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+@media (max-width: 900px) {
+  .installer-hero,
+  .installer-body {
+    grid-template-columns: 1fr;
+  }
+
+  .installer-brand-block h1 {
+    max-width: none;
+  }
+}

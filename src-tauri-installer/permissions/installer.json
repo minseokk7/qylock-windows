@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/permission-schema.json",
+  "permission": [
+    {
+      "identifier": "installer-commands",
+      "description": "Allow installer commands",
+      "commands": {
+        "allow": [
+          "get_installer_metadata",
+          "install_qylock"
+        ]
+      }
+    }
+  ]
+}

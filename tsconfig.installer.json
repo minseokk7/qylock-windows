@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src-installer", "vite.installer.config.ts"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}

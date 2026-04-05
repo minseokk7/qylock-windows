@@ -1,0 +1,19 @@
+[package]
+name = "qylock-installer"
+version = "0.1.4"
+description = "Custom installer bootstrapper for qylock."
+authors = ["minseok"]
+edition = "2021"
+license = "GPL-3.0-only"
+
+[lib]
+name = "qylock_installer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+serde_json = "1"
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }

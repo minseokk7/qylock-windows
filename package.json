@@ -17,6 +17,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "installer:dev": "vite --config vite.installer.config.ts",
+    "installer:build": "tsc -p tsconfig.installer.json && vite build --config vite.installer.config.ts",
+    "installer:tauri:dev": "npm run installer:build && cargo run --manifest-path src-tauri-installer/Cargo.toml",
+    "installer:tauri:build": "npm run installer:build && cargo build --release --manifest-path src-tauri-installer/Cargo.toml",
     "preview": "vite preview",
     "tauri": "tauri"
   },
