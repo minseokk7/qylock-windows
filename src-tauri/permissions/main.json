@@ -15,7 +15,11 @@
           "control_now_playing",
           "hide_settings_window",
           "get_settings",
-          "save_settings"
+          "save_settings",
+          "get_app_version",
+          "check_for_updates",
+          "download_and_install_update",
+          "turn_off_display"
         ]
       }
     }

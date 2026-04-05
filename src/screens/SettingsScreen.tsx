@@ -49,6 +49,7 @@ function SettingsScreen() {
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [isDownloadingUpdate, setIsDownloadingUpdate] = useState(false);
+  const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -156,17 +157,25 @@ function SettingsScreen() {
     setToast(null);
 
     try {
+      console.log("Checking for updates...");
       const result = await invoke<UpdateCheckResult>("check_for_updates");
+      console.log("Update check result:", result);
+      
       setUpdateResult(result);
       setCurrentVersion(result.currentVersion);
-      setToast({
-        message: result.updateAvailable
-          ? `새 버전 ${result.latestVersion}을 사용할 수 있습니다.`
-          : "이미 최신 버전을 사용 중입니다.",
-        tone: "success",
-      });
+
+      if (result.updateAvailable) {
+        console.log("Opening update modal...");
+        setIsUpdateModalOpen(true);
+      } else {
+        console.log("No update available.");
+        setToast({
+          message: "이미 최신 버전을 사용 중입니다.",
+          tone: "success",
+        });
+      }
     } catch (error) {
-      console.error(error);
+      console.error("Failed to check for updates:", error);
       setToast({
         message: "업데이트를 확인하지 못했습니다.",
         tone: "error",
@@ -307,8 +316,8 @@ function SettingsScreen() {
                 <span className="settings-label">{"업데이트"}</span>
                 <p className="settings-help">
                   {currentVersion
-                    ? `현재 버전 qylock ${currentVersion}`
-                    : "현재 버전을 확인하는 중입니다."}
+                    ? `현재 버전: ${currentVersion}`
+                    : "버전 정보를 확인하는 중..."}
                 </p>
               </div>
               <button
@@ -320,47 +329,6 @@ function SettingsScreen() {
                 {isCheckingUpdate ? "확인 중.." : "업데이트 확인"}
               </button>
             </div>
-
-            {updateResult ? (
-              <div className="settings-update-body">
-                <p className="settings-update-status">
-                  {updateResult.updateAvailable
-                    ? `새 버전 ${updateResult.latestVersion} 사용 가능`
-                    : `최신 버전 ${updateResult.latestVersion} 사용 중`}
-                </p>
-                {updateResult.releaseName ? (
-                  <p className="settings-help">{updateResult.releaseName}</p>
-                ) : null}
-                {updateResult.summary ? (
-                  <p className="settings-help">{updateResult.summary}</p>
-                ) : null}
-                {updateResult.publishedAt ? (
-                  <p className="settings-help">
-                    {`배포일 ${formatPublishedDate(updateResult.publishedAt)}`}
-                  </p>
-                ) : null}
-                <div className="settings-update-actions">
-                  {updateResult.updateAvailable && updateResult.downloadUrl ? (
-                    <button
-                      type="button"
-                      className="settings-button primary"
-                      onClick={() => void handleDownloadAndInstall()}
-                      disabled={isDownloadingUpdate}
-                    >
-                      {isDownloadingUpdate ? "다운로드 중.." : "지금 다운로드 및 설치"}
-                    </button>
-                  ) : null}
-                  <button
-                    type="button"
-                    className="settings-button"
-                    onClick={() => void handleOpenReleasePage()}
-                    disabled={isDownloadingUpdate}
-                  >
-                    {"릴리즈 노트 보기"}
-                  </button>
-                </div>
-              </div>
-            ) : null}
           </div>
 
           <div className="settings-card settings-card-feature">
@@ -476,6 +444,100 @@ function SettingsScreen() {
           </button>
         </div>
       </div>
+
+      {isUpdateModalOpen && updateResult && (
+        <div
+          className="settings-modal-overlay"
+          onClick={() => !isDownloadingUpdate && setIsUpdateModalOpen(false)}
+        >
+          <div className="settings-modal-container" onClick={(e) => e.stopPropagation()}>
+            <div className="settings-modal-header">
+              <div>
+                <p className="settings-kicker">New Update Available</p>
+                <h2 className="settings-modal-title">새로운 버전이 나왔습니다!</h2>
+              </div>
+              <button
+                type="button"
+                className="settings-modal-close"
+                onClick={() => setIsUpdateModalOpen(false)}
+                disabled={isDownloadingUpdate}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="settings-modal-body">
+              <div className="settings-modal-version-badges">
+                <div className="settings-modal-version-badge">{updateResult.currentVersion}</div>
+                <div className="settings-modal-arrow">➜</div>
+                <div className="settings-modal-version-badge is-new">
+                  {updateResult.latestVersion}
+                </div>
+              </div>
+
+              <div className="settings-modal-release-notes">
+                <h4>릴리즈 정보</h4>
+                <div className="settings-modal-notes-content">
+                  <p style={{ fontWeight: "bold", marginBottom: "8px", color: "#fff" }}>
+                    {updateResult.releaseName || "커뮤니티 릴리즈"}
+                  </p>
+                  <p style={{ margin: 0 }}>
+                    {updateResult.summary || "상세한 릴리즈 노트가 제공되지 않았습니다."}
+                  </p>
+                </div>
+                {updateResult.publishedAt && (
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      marginTop: "12px",
+                    }}
+                  >
+                    <p className="settings-help" style={{ margin: 0 }}>
+                      배포일: {formatPublishedDate(updateResult.publishedAt)}
+                    </p>
+                    <button
+                      type="button"
+                      className="settings-help"
+                      style={{
+                        background: "none",
+                        border: "none",
+                        padding: 0,
+                        color: "#ffb84d",
+                        cursor: "pointer",
+                        textDecoration: "underline",
+                      }}
+                      onClick={() => void handleOpenReleasePage()}
+                    >
+                      상세 보기 (GitHub)
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="settings-modal-footer">
+              <button
+                type="button"
+                className="settings-modal-button is-later"
+                onClick={() => setIsUpdateModalOpen(false)}
+                disabled={isDownloadingUpdate}
+              >
+                나중에
+              </button>
+              <button
+                type="button"
+                className="settings-modal-button is-primary"
+                onClick={() => void handleDownloadAndInstall()}
+                disabled={isDownloadingUpdate}
+              >
+                {isDownloadingUpdate ? "다운로드 중..." : "지금 설치 및 다시 시작"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
