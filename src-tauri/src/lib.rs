@@ -7,7 +7,7 @@ use std::{
     io::ErrorKind,
     mem::size_of,
     path::PathBuf,
-    sync::{Arc, Condvar, LazyLock, Mutex, OnceLock},
+    sync::{mpsc, Arc, Condvar, LazyLock, Mutex, OnceLock},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -63,6 +63,7 @@ struct LockState {
     is_locked: bool,
     allow_exit: bool,
     last_auto_lock_input_tick: Option<u32>,
+    last_display_off_input_tick: Option<u32>,
 }
 
 static LOCK_STATE: LazyLock<Mutex<LockState>> = LazyLock::new(|| Mutex::new(LockState::default()));
@@ -254,8 +255,10 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                         }
                     }
 
-                    if let Err(error) = turn_off_display() {
-                        eprintln!("failed to turn off display from keyboard hook: {error}");
+                    if !turn_off_display_impl() {
+                        eprintln!("failed to turn off display from keyboard hook");
+                    } else {
+                        reset_display_off_baseline();
                     }
                 }) {
                     eprintln!(
@@ -679,6 +682,12 @@ fn reset_auto_lock_baseline() {
         .map(|(_, last_input_tick)| last_input_tick);
 }
 
+fn reset_display_off_baseline() {
+    LOCK_STATE.lock().unwrap().last_display_off_input_tick = current_system_idle_state()
+        .ok()
+        .map(|(_, last_input_tick)| last_input_tick);
+}
+
 fn notify_auto_lock_watcher() {
     let (signal_mutex, signal) = &*AUTO_LOCK_WATCHER_SIGNAL;
     let mut generation = signal_mutex.lock().unwrap();
@@ -1025,6 +1034,54 @@ fn start_auto_lock_watcher(app: AppHandle) {
     });
 }
 
+fn start_display_off_watcher(app: AppHandle) {
+    thread::spawn(move || loop {
+        let settings = current_settings();
+        let is_locked = LOCK_STATE.lock().unwrap().is_locked;
+
+        if settings.blackout_timeout_seconds == 0 || !is_locked {
+            wait_for_auto_lock_signal(Duration::from_secs(2));
+            continue;
+        }
+
+        let (idle_seconds, last_input_tick) = match current_system_idle_state() {
+            Ok(state) => state,
+            Err(error) => {
+                eprintln!("{error}");
+                wait_for_auto_lock_signal(Duration::from_secs(2));
+                continue;
+            }
+        };
+
+        let should_turn_off_display = {
+            let mut state = LOCK_STATE.lock().unwrap();
+            if !state.is_locked || idle_seconds < settings.blackout_timeout_seconds {
+                false
+            } else if state.last_display_off_input_tick == Some(last_input_tick) {
+                false
+            } else {
+                state.last_display_off_input_tick = Some(last_input_tick);
+                true
+            }
+        };
+
+        if should_turn_off_display {
+            if let Err(error) = app.run_on_main_thread(move || {
+                if !turn_off_display_impl() {
+                    eprintln!("failed to turn off display after lock timeout");
+                }
+            }) {
+                eprintln!("failed to schedule display-off timeout on main thread: {error}");
+            }
+            wait_for_auto_lock_signal(Duration::from_millis(250));
+            continue;
+        }
+
+        let remaining_seconds = settings.blackout_timeout_seconds.saturating_sub(idle_seconds);
+        wait_for_auto_lock_signal(Duration::from_secs(remaining_seconds.clamp(1, 2)));
+    });
+}
+
 fn start_media_bridge(app: AppHandle) {
     thread::spawn(move || loop {
         let manager = match request_media_session_manager() {
@@ -1327,6 +1384,7 @@ fn unlock_and_unhook(app: &AppHandle) {
         state.last_auto_lock_input_tick = current_system_idle_state()
             .ok()
             .map(|(_, last_input_tick)| last_input_tick);
+        state.last_display_off_input_tick = None;
         std::mem::take(&mut state.aux_window_labels)
     };
 
@@ -1395,6 +1453,7 @@ fn lock_screen_impl(app: &AppHandle) -> Result<(), String> {
     state.is_locked = true;
     state.aux_window_labels = aux_window_labels;
     drop(state);
+    reset_display_off_baseline();
     let _ = app.emit("lock-state-changed", true);
     notify_auto_lock_watcher();
 
@@ -1598,8 +1657,7 @@ fn send_monitor_power_signal(target: HWND) -> bool {
     }
 }
 
-#[tauri::command]
-fn turn_off_display() -> Result<bool, String> {
+fn turn_off_display_impl() -> bool {
     let mut signaled = false;
 
     unsafe {
@@ -1618,7 +1676,25 @@ fn turn_off_display() -> Result<bool, String> {
 
     signaled |= send_monitor_power_signal(HWND_BROADCAST);
 
-    Ok(signaled)
+    signaled
+}
+
+#[tauri::command]
+fn turn_off_display(app: AppHandle) -> Result<bool, String> {
+    let (result_tx, result_rx) = mpsc::channel();
+
+    app.run_on_main_thread(move || {
+        let result = turn_off_display_impl();
+        if result {
+            reset_display_off_baseline();
+        }
+        let _ = result_tx.send(result);
+    })
+    .map_err(|error| format!("failed to schedule display-off on main thread: {error}"))?;
+
+    result_rx
+        .recv_timeout(Duration::from_secs(1))
+        .map_err(|error| format!("failed to receive display-off result: {error}"))
 }
 
 #[tauri::command]
@@ -1760,6 +1836,7 @@ pub fn run() {
             }
             start_system_event_watcher();
             start_auto_lock_watcher(app.handle().clone());
+            start_display_off_watcher(app.handle().clone());
             start_media_bridge(app.handle().clone());
             build_tray(app.handle())?;
             Ok(())

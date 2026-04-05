@@ -1,6 +1,6 @@
 [package]
 name = "qylock-windows"
-version = "0.1.3"
+version = "0.1.4"
 description = "Windows tray lock screen app built with Tauri and React."
 authors = ["minseok"]
 edition = "2021"
