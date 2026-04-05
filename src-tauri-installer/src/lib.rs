@@ -86,6 +86,19 @@ async fn install_qylock() -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let args: Vec<String> = env::args().collect();
+    let is_silent = args.iter().any(|arg| arg == "--silent" || arg == "-s");
+
+    if is_silent {
+        match run_embedded_install() {
+            Ok(_) => std::process::exit(0),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_installer_metadata,

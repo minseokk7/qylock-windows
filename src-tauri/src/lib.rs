@@ -7,6 +7,7 @@ use std::{
     io::ErrorKind,
     mem::size_of,
     path::PathBuf,
+    process::Command,
     sync::{mpsc, Arc, Condvar, LazyLock, Mutex, OnceLock},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -126,6 +127,7 @@ struct UpdateCheckResult {
     latest_version: String,
     update_available: bool,
     release_url: String,
+    download_url: Option<String>,
     published_at: Option<String>,
     release_name: Option<String>,
     summary: Option<String>,
@@ -138,6 +140,13 @@ struct GitHubLatestRelease {
     published_at: Option<String>,
     name: Option<String>,
     body: Option<String>,
+    assets: Vec<GitHubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubAsset {
+    name: String,
+    browser_download_url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1738,6 +1747,10 @@ async fn check_for_updates() -> Result<UpdateCheckResult, String> {
     let latest_version_raw = normalize_version_tag(&latest_release.tag_name);
     let latest_version = parse_release_version(&latest_release.tag_name)?;
 
+    let download_url = latest_release.assets.iter()
+        .find(|asset| asset.name == "qylock-installer.exe")
+        .map(|asset| asset.browser_download_url.clone());
+
     Ok(UpdateCheckResult {
         current_version: current_version_raw,
         latest_version: latest_version_raw,
@@ -1747,10 +1760,51 @@ async fn check_for_updates() -> Result<UpdateCheckResult, String> {
         } else {
             latest_release.html_url
         },
+        download_url,
         published_at: latest_release.published_at,
         release_name: latest_release.name,
         summary: summarize_release_notes(latest_release.body.as_deref()),
     })
+}
+
+#[tauri::command]
+async fn download_and_install_update(app: AppHandle, url: String) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let response = client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, "qylock-windows-updater")
+        .send()
+        .await
+        .map_err(|error| format!("failed to start update download: {error}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "failed to download update: server returned {}",
+            response.status()
+        ));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("failed to read update download bytes: {error}"))?;
+
+    let temp_dir = env::temp_dir().join("qylock-updates");
+    fs::create_dir_all(&temp_dir)
+        .map_err(|error| format!("failed to create update temp directory: {error}"))?;
+
+    let installer_path = temp_dir.join("qylock-installer-latest.exe");
+    fs::write(&installer_path, bytes)
+        .map_err(|error| format!("failed to save update installer: {error}"))?;
+
+    // Launch the installer with --silent and exit the app
+    Command::new(&installer_path)
+        .arg("--silent")
+        .spawn()
+        .map_err(|error| format!("failed to launch update installer: {error}"))?;
+
+    quit_app(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1809,6 +1863,7 @@ pub fn run() {
             turn_off_display,
             get_app_version,
             check_for_updates,
+            download_and_install_update,
             get_settings,
             save_settings
         ])

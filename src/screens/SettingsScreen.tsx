@@ -16,6 +16,7 @@ type UpdateCheckResult = {
   latestVersion: string;
   updateAvailable: boolean;
   releaseUrl: string;
+  downloadUrl: string | null;
   publishedAt: string | null;
   releaseName: string | null;
   summary: string | null;
@@ -47,6 +48,7 @@ function SettingsScreen() {
   const [currentVersion, setCurrentVersion] = useState("");
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [isDownloadingUpdate, setIsDownloadingUpdate] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -189,6 +191,27 @@ function SettingsScreen() {
     }
   };
 
+  const handleDownloadAndInstall = async () => {
+    if (!updateResult?.downloadUrl) {
+      return;
+    }
+
+    setIsDownloadingUpdate(true);
+    setToast(null);
+
+    try {
+      await invoke("download_and_install_update", { url: updateResult.downloadUrl });
+      // 앱이 성공적으로 종료될 것이므로 상태 리셋은 필요 없음
+    } catch (error) {
+      console.error(error);
+      setToast({
+        message: "업데이트 다운로드에 실패했습니다.",
+        tone: "error",
+      });
+      setIsDownloadingUpdate(false);
+    }
+  };
+
   const handleDragMouseDown = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (event.button !== 0) {
       return;
@@ -317,12 +340,23 @@ function SettingsScreen() {
                   </p>
                 ) : null}
                 <div className="settings-update-actions">
+                  {updateResult.updateAvailable && updateResult.downloadUrl ? (
+                    <button
+                      type="button"
+                      className="settings-button primary"
+                      onClick={() => void handleDownloadAndInstall()}
+                      disabled={isDownloadingUpdate}
+                    >
+                      {isDownloadingUpdate ? "다운로드 중.." : "지금 다운로드 및 설치"}
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className="settings-button"
                     onClick={() => void handleOpenReleasePage()}
+                    disabled={isDownloadingUpdate}
                   >
-                    {"다운로드 열기"}
+                    {"릴리즈 노트 보기"}
                   </button>
                 </div>
               </div>
