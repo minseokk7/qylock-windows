@@ -8,6 +8,7 @@ use std::{
     mem::size_of,
     path::PathBuf,
     process::Command,
+    os::windows::process::CommandExt,
     sync::{mpsc, Arc, Condvar, LazyLock, Mutex, OnceLock},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -50,7 +51,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_KEYDOWN, WM_POWERBROADCAST, WM_SYSCOMMAND,
     WM_SYSKEYDOWN, WM_WTSSESSION_CHANGE, WNDCLASSW, WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
 };
-use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+
 
 struct SafeHHook(HHOOK);
 unsafe impl Send for SafeHHook {}
@@ -374,26 +375,72 @@ fn persist_settings_to_disk(app: &AppHandle, settings: &AppSettings) -> Result<(
     })
 }
 
-fn startup_command_value() -> Result<String, String> {
-    let exe_path = env::current_exe()
-        .map_err(|error| format!("failed to resolve current executable: {error}"))?;
-    Ok(format!("\"{}\"", exe_path.display()))
+
+
+fn run_powershell_admin(script_content: &str) -> std::io::Result<std::process::ExitStatus> {
+    use std::fs;
+    let temp_dir = std::env::temp_dir().join("qylock");
+    let _ = fs::create_dir_all(&temp_dir);
+    let script_path = temp_dir.join("qylock_admin_task.ps1");
+    fs::write(&script_path, script_content)?;
+
+    let wrapper_cmd = format!(
+        "Start-Process powershell.exe -Verb RunAs -ArgumentList '-ExecutionPolicy Bypass -WindowStyle Hidden -File \"{}\"' -Wait -WindowStyle Hidden",
+        script_path.display()
+    );
+
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &wrapper_cmd])
+        .creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0)
+        .status()?;
+
+    let _ = fs::remove_file(script_path);
+
+    Ok(status)
 }
 
 fn sync_launch_on_startup(settings: &AppSettings) -> Result<(), String> {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (run_key, _) = hkcu
-        .create_subkey(STARTUP_REGISTRY_KEY)
-        .map_err(|error| format!("failed to open startup registry key: {error}"))?;
+    // 1. Clean up legacy registry key (run key) to prevent double startup
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    if let Ok((run_key, _)) = hkcu.create_subkey(STARTUP_REGISTRY_KEY) {
+        let _ = run_key.delete_value(STARTUP_VALUE_NAME);
+    }
+
+    let task_name = "QyLock_Autorun";
 
     if settings.launch_on_startup {
-        let command = startup_command_value()?;
-        run_key
-            .set_value(STARTUP_VALUE_NAME, &command)
-            .map_err(|error| format!("failed to enable launch on startup: {error}"))?;
-    } else if let Err(error) = run_key.delete_value(STARTUP_VALUE_NAME) {
-        if error.kind() != ErrorKind::NotFound {
-            return Err(format!("failed to disable launch on startup: {error}"));
+        let exe_path = env::current_exe()
+            .map_err(|error| format!("failed to resolve current executable: {error}"))?;
+        let path_str = exe_path.display().to_string();
+
+        let ps_script = format!(
+            "$ErrorActionPreference = 'Stop'\n\
+             $Action = New-ScheduledTaskAction -Execute \"{}\"\n\
+             $Trigger = New-ScheduledTaskTrigger -AtLogOn\n\
+             $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0 -Hidden -Compatibility Win8\n\
+             $Principal = New-ScheduledTaskPrincipal -UserId (Get-CimInstance Win32_ComputerSystem).UserName -RunLevel Highest\n\
+             Register-ScheduledTask -TaskName \"{}\" -Action $Action -Trigger $Trigger -Settings $Settings -Principal $Principal -Force\n",
+            path_str, task_name
+        );
+
+        let status = run_powershell_admin(&ps_script)
+            .map_err(|e| format!("failed to invoke powershell: {}", e))?;
+
+        if !status.success() {
+            return Err(format!("Task Scheduler registration failed (UAC may have been declined)."));
+        }
+    } else {
+        let ps_script = format!(
+            "Unregister-ScheduledTask -TaskName \"{}\" -Confirm:$false\n",
+            task_name
+        );
+
+        let status = run_powershell_admin(&ps_script)
+            .map_err(|e| format!("failed to invoke powershell: {}", e))?;
+
+        if !status.success() {
+            // It might fail if the task didn't exist in the first place, ignore it.
+            // But we should not error out the save flow.
         }
     }
 
