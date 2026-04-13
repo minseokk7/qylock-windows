@@ -1,6 +1,6 @@
 [package]
 name = "qylock-installer"
-version = "0.2.0"
+version = "0.2.1"
 description = "Custom installer bootstrapper for qylock."
 authors = ["minseok"]
 edition = "2021"

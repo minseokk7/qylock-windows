@@ -38,7 +38,7 @@ use windows::Win32::System::WinRT::IUserConsentVerifierInterop;
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetLastInputInfo, LASTINPUTINFO, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE,
-    VK_F4, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_TAB,
+    VK_F4, VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
@@ -231,10 +231,8 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             state.is_locked
         };
 
-        if !is_locked && is_key_down && is_l && is_ctrl && (is_alt || is_menu) && !is_shift {
-            if cfg!(debug_assertions) {
-                eprintln!("keyboard hook detected Ctrl+Alt+L");
-            }
+        if is_key_down && is_l && is_ctrl && (is_alt || is_menu) && !is_shift {
+            if cfg!(debug_assertions) { eprintln!("keyboard hook: detected Ctrl+Alt+L (Lock screen triggered)"); }
             if let Some(app) = APP_HANDLE.get().cloned() {
                 let app_handle = app.clone();
                 if let Err(error) = app.run_on_main_thread(move || {
@@ -282,13 +280,25 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             return CallNextHookEx(None, code, wparam, lparam);
         }
 
-        if is_locked
-            && (is_windows_combo
+        if is_locked {
+            if is_key_down && vk == VK_RETURN {
+                if let Some(app) = APP_HANDLE.get().cloned() {
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = verify_hello_impl(&app).await {
+                            eprintln!("Windows Hello invocation from keyboard hook failed: {e}");
+                        }
+                    });
+                }
+                return LRESULT(1);
+            }
+
+            if is_windows_combo
                 || (vk == VK_TAB && is_alt)
                 || (vk == VK_F4 && is_alt)
-                || (vk == VK_ESCAPE && (is_alt || is_ctrl)))
-        {
-            return LRESULT(1);
+                || (vk == VK_ESCAPE && (is_alt || is_ctrl))
+            {
+                return LRESULT(1);
+            }
         }
     }
 
@@ -1324,7 +1334,7 @@ fn ensure_aux_window(app: &AppHandle, label: &str, monitor: &Monitor) -> Result<
             .title("qylock 잠금 화면")
             .decorations(false)
             .resizable(false)
-            .transparent(true)
+            .transparent(false)
             .always_on_top(true)
             .skip_taskbar(true)
             .visible_on_all_workspaces(true)
@@ -1504,8 +1514,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let _ = tray_builder.build(app)?;
     Ok(())
 }
-#[tauri::command]
-async fn verify_hello(app: AppHandle) -> Result<bool, String> {
+async fn verify_hello_impl(app: &AppHandle) -> Result<bool, String> {
     let availability = UserConsentVerifier::CheckAvailabilityAsync()
         .map_err(|error| format!("failed to check Windows Hello availability: {error}"))?
         .await
@@ -1528,7 +1537,7 @@ async fn verify_hello(app: AppHandle) -> Result<bool, String> {
         _ => return Err("Windows Hello is unavailable.".into()),
     }
 
-    set_lock_windows_topmost(&app, false, false);
+    set_lock_windows_topmost(app, false, false);
     hide_taskbars();
 
     let operation = {
@@ -1556,31 +1565,36 @@ async fn verify_hello(app: AppHandle) -> Result<bool, String> {
         Ok(result) => result,
         Err(error) => {
             hide_taskbars();
-            set_lock_windows_topmost(&app, true, true);
+            set_lock_windows_topmost(app, true, true);
             return Err(error);
         }
     };
 
     match result {
         UserConsentVerificationResult::Verified => {
-            unlock_and_unhook(&app);
+            unlock_and_unhook(app);
             Ok(true)
         }
         UserConsentVerificationResult::Canceled
         | UserConsentVerificationResult::RetriesExhausted => {
             hide_taskbars();
-            set_lock_windows_topmost(&app, true, true);
+            set_lock_windows_topmost(app, true, true);
             Ok(false)
         }
         status => {
             hide_taskbars();
-            set_lock_windows_topmost(&app, true, true);
+            set_lock_windows_topmost(app, true, true);
             Err(format!(
                 "Windows Hello verification failed with status: {:?}",
                 status
             ))
         }
     }
+}
+
+#[tauri::command]
+async fn verify_hello(app: AppHandle) -> Result<bool, String> {
+    verify_hello_impl(&app).await
 }
 
 #[tauri::command]
@@ -1899,5 +1913,6 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
 
 

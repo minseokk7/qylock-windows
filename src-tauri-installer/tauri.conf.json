@@ -1,11 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "qylock-installer",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "identifier": "com.minseok.qylock-installer",
   "build": {
-    "beforeDevCommand": "npm run installer:dev",
-    "devUrl": "http://localhost:1422",
     "beforeBuildCommand": "npm run installer:build",
     "frontendDist": "../dist-installer"
   },

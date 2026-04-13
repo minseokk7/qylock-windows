@@ -1,7 +1,7 @@
 {
   "name": "qylock-windows",
   "private": false,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Windows tray lock screen app built with Tauri and React.",
   "author": "minseok",
   "license": "GPL-3.0-only",
